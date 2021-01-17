@@ -1,0 +1,57 @@
+#!/bin/bash
+
+TEXT_COLOR_ON=$(tput setaf 2)
+TEXT_COLOR_OFF=$(tput setaf 1)
+TEXT_COLOR_RESET=$(tput sgr0)
+
+function is_enabled() {
+	if [ "$(xinput list $deviceid | grep -i 'This device is disabled' | wc -l)" == "0" ]; then
+		true
+	else
+		false
+	fi
+}
+
+action=$1
+deviceid=$(xinput list --short | grep 'ELAN' | grep -oP 'id=[0-9]{1,2}' | cut -d'=' -f2)
+
+if [ -z "$deviceid" ]; then
+	echo "Touchscreen not found."
+	exit 1
+fi
+
+if [ "$action" == "on" ]; then
+
+	xinput enable $deviceid
+
+elif [ "$action" == "off" ]; then
+
+	xinput disable $deviceid
+
+elif [ "$action" == "toggle" ]; then
+
+	if [ "$(xinput list --short $deviceid | grep -i 'This device is disabled' | wc -l)" == "0" ]; then
+		xinput disable $deviceid
+	else
+		xinput enable $deviceid
+	fi
+
+fi
+
+if is_enabled; then
+
+	echo "Touchscreen: ${TEXT_COLOR_ON}Enabled${TEXT_COLOR_RESET}"
+
+	if [[ "$@" =~ "--notify" ]] || [[ "$@" =~ "-n" ]]; then
+		notify-send -u normal -i input-touchpad "Touchscreen" "<span color='#50FA7B'><b>Enabled</b></span>"
+	fi
+
+else
+
+	echo "Touchscreen: ${TEXT_COLOR_OFF}Disabled${TEXT_COLOR_RESET}"
+
+	if [[ "$@" =~ "--notify" ]] || [[ "$@" =~ "-n" ]]; then
+		notify-send -u normal -i input-touchpad "Touchscreen" "<span color='#FF5555'><b>Disabled</b></span>"
+	fi
+
+fi
