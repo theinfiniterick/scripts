@@ -16,11 +16,14 @@ VIEW_SIZE=60
 # Image formats
 FORMATS=(png jpg gif bmp tif)
 
+# Show image instead of screenshot icon in notifications
+IMAGE_IN_NOTIFICATION=true
+
 # Default command line argument values
 source="fullscreen"
 destination="file"
 view_image=false
-delay=0
+delay="0"
 
 show_help() {
 
@@ -36,7 +39,7 @@ show_help() {
     echo "  -d, --delay SECONDS  Delay before screenshot"
     echo "  -v, --view           View Screenshot"
     echo "  -h, --help           Show this message"
-    echo
+    # echo
 
     exit 0
 
@@ -83,11 +86,11 @@ base_directory() {
 
 }
 
-for arg in $@; do
+# for arg in $@; do
+while [ "$1" != "" ]; do
     case "$1" in
         '-h'|'--help')
             show_help
-            shift 1
             ;;
         '-s'|'--selection')
             source="selection"
@@ -113,47 +116,60 @@ for arg in $@; do
             delay=$2
             shift 2
             ;;
+        *)
+            arg=$1
+            if [ "${arg:0:1}" != "-" ] && [[ " ${arg[@]} " =~ "." ]]; then
+                path=$arg
+                shift 1
+            else
+                echo "Invalid argument: $1"
+                exit 1
+            fi
+            ;;
     esac
 done
 
-# Get format and path
-if [ -z "$path" ]; then
+# Set path if necessary
+if [ "$destination" == "clipboard" ]; then
 
-    if [ "$destination" == "clipboard" ]; then
-
-        if [ -n "$XDG_CACHE_HOME" ]; then
-            directory=$XDG_CACHE_HOME
-        else
-            directory="$HOME/.cache"
-        fi
-
-        filename="screenshot.$DEFAULT_FORMAT"
-        path="$directory/$filename"
-
+    if [ -n "$XDG_CACHE_HOME" ]; then
+        directory=$XDG_CACHE_HOME
     else
-
-        filename="$(date "+%Y-%m-%d_%H:%M:%S").$DEFAULT_FORMAT"
-        path="$(base_directory)/$DIRECTORY_NAME/$filename"
-
-        # If path already exists then add milliseconds to filename
-        if [ -f "$path" ]; then
-            filename="$(date "+%Y-%m-%d_%H:%M:%S.%N").$DEFAULT_FORMAT"
-            path="$(base_directory)/$DIRECTORY_NAME/$filename"
-        fi
-
+        directory="$HOME/.cache"
     fi
 
+    filename="screenshot.$DEFAULT_FORMAT"
+    path="$directory/$filename"
+
+elif [ -z "$path" ]; then
+
+    filename="$(date "+%Y-%m-%d_%H:%M:%S").$DEFAULT_FORMAT"
+    path="$(base_directory)/$DIRECTORY_NAME/$filename"
+
+    # If path already exists then add milliseconds to filename
+    if [ -f "$path" ]; then
+        filename="$(date "+%Y-%m-%d_%H:%M:%S.%N").$DEFAULT_FORMAT"
+        path="$(base_directory)/$DIRECTORY_NAME/$filename"
+    fi
+
+fi
+
+filename="$(basename $path)"
+
+# if path is not absolute then set path to "$PWD/$path"
+if [ "${str:0:1}" != "/" ]; then
+    path="$PWD/$path"
 fi
 
 # Validate image format
 format=$(echo $path | awk -F '.' '{print $NF}')
 
 if ! [[ " ${FORMATS[@]} " =~ " ${format} " ]]; then
-    echo "Format $format invalid."
+    echo "Error: '$format' is not a valid image file extension."
     exit 1
 fi
 
-# Validate destination directory exists
+# Validate destination directory
 directory=$(dirname "$path")
 
 if ! [ -d "$directory" ]; then
@@ -163,25 +179,37 @@ if ! [ -d "$directory" ]; then
     if [ -d "$parent_directory" ]; then
         mkdir "$directory"
     else
-        echo "Directory $directory does not exist."
+        echo "Error: directory \"$directory\" does not exist."
         exit 1
     fi
 
 fi
 
-# Delay if value is greater than zero
-if [ $delay -gt 0 ]; then
-    sleep $delay
+# Validate delay
+if ! [[ "$delay" =~ ^[0-9]+$ ]]; then
+    echo "Delay $delay is not valid."
+    exit 1
 fi
 
-# Take screenshot
+# Create import command
 if [ "$source" == "selection" ]; then
-    import "$path"
+    cmd="magick import"
 elif [ "$source" == "window" ]; then
-    import -window \"$(xdotool getwindowfocus)\" "$path"
+    cmd="magick import -window \"$(xdotool getwindowfocus)\""
 elif [ "$source" == "fullscreen" ]; then
-    import -window root "$path"
+    cmd="magick import -window root"
 fi
+
+# Add delay to import command
+if [ "$delay" != "0" ]; then
+    cmd+=" -pause $delay"
+fi
+
+# Add path to import command
+cmd+=" \"$path\""
+
+# Execute import command
+eval $cmd
 
 # Put screenshot image in clipboard
 if [ $destination == "clipboard" ]; then
@@ -190,7 +218,29 @@ fi
 
 # Display screenshot preview
 if [ $view_image == true ]; then
-    display -resize $VIEW_SIZE% "$path"
+
+    if [ "$source" == "fullscreen" ]; then
+        magick display -title "Screenshot: $filename" -resize $VIEW_SIZE% "$path"
+    else
+        magick display -title "Screenshot: $filename" "$path"
+    fi
+
+else
+
+    # Set notification icon to image or icon
+    if [ $IMAGE_IN_NOTIFICATION == true ]; then
+        icon="file:///$path"
+    else
+        icon="screenshot"
+    fi
+
+    # Send screenshot notification
+    if [ $destination == "clipboard" ]; then
+        notify-send -i "$icon" "Screenshot" "Saved to clipboard."
+    else
+        notify-send -i "$icon" "Screenshot" "$path"
+    fi
+
 fi
 
 # Remove unwanted image file
