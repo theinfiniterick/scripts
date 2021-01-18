@@ -1,7 +1,7 @@
 #!/bin/bash
 
 DEFAULT_FORMAT="png"
-DEFAULT_DIRECTORY="$HOME/images/shot"
+DEFAULT_DIRECTORY="$HOME/Pictures/screenshots"
 
 VIEW_SIZE=50
 FORMATS=(png jpg gif bmp tif)
