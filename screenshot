@@ -154,7 +154,9 @@ elif [ -z "$path" ]; then
 
 fi
 
-filename="$(basename $path)"
+if [ -z "$filename" ]; then
+    filename="$(basename $path)"
+fi
 
 # if path is not absolute then set path to "$PWD/$path"
 if [ "${str:0:1}" != "/" ]; then
