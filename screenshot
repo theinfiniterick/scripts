@@ -157,7 +157,7 @@ if [ -z "$filename" ]; then
 fi
 
 # if path is not absolute then set path to "$PWD/$path"
-if [ "${str:0:1}" != "/" ]; then
+if [ "${path:0:1}" != "/" ]; then
     path="$PWD/$path"
 fi
 
@@ -219,7 +219,7 @@ fi
 # Display screenshot preview
 if [ $view_image == true ]; then
 
-    if [ "$source" == "fullscreen" ]; then
+    if [ "$source" == "fullscreen" ] || [ "$source" == "window" ]; then
         magick display -title "Screenshot: $filename" -resize $VIEW_SIZE% "$path"
     else
         magick display -title "Screenshot: $filename" "$path"
