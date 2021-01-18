@@ -11,7 +11,7 @@ DEFAULT_FORMAT="png"
 DEFAULT_DIRECTORY="shot"
 
 # Size of image view in percentage of screen
-VIEW_SIZE=60
+FULLSCREEN_VIEW_SIZE=60
 
 # Image formats
 FORMATS=(png jpg gif bmp tif)
@@ -150,22 +150,22 @@ elif [ -z "$path" ]; then
         path="$(base_directory)/$DEFAULT_DIRECTORY/$filename"
     fi
 
-fi
+else
 
-if [ -z "$filename" ]; then
     filename="$(basename $path)"
-fi
 
-# Validate path
-if [ "${path:0:1}" != "/" ]; then
-    path="$PWD/$path"
+    # Ensure path is absolute
+    if [ "${path:0:1}" != "/" ]; then
+        path="$PWD/$path"
+    fi
+
 fi
 
 # Validate image format
 format=$(echo $path | awk -F '.' '{print $NF}')
 
 if ! [[ " ${FORMATS[@]} " =~ " ${format} " ]]; then
-    echo "Error: '$format' is not a valid image file extension."
+    echo "Error: '$format' is not a valid image file format."
     exit 1
 fi
 
@@ -176,8 +176,15 @@ if ! [ -d "$directory" ]; then
 
     parent_directory=$(dirname "$directory")
 
+    parent_owner="$(stat -c '%U' $parent_directory)"
+
     if [ -d "$parent_directory" ]; then
-        mkdir "$directory"
+        if [ "$parent_owner" != "$USER" ]; then
+            echo "Error: cannot create directory $directory. You don't own $parent_directory."
+            exit 1
+        else
+            mkdir "$directory"
+        fi
     else
         echo "Error: directory \"$directory\" does not exist."
         exit 1
@@ -187,7 +194,7 @@ fi
 
 # Validate delay
 if ! [[ $delay =~ ^[+-]?[0-9]*$ ]] && ! [[ $delay =~ ^[+-]?[0-9]+\.?[0-9]*$ ]]; then
-    echo "Delay $delay is not valid."
+    echo "Error: $delay is not a valid delay."
     exit 1
 fi
 
@@ -220,7 +227,7 @@ fi
 if [ $view_image == true ]; then
 
     if [ "$source" == "fullscreen" ] || [ "$source" == "window" ]; then
-        magick display -title "Screenshot: $filename" -resize $VIEW_SIZE% "$path"
+        magick display -title "Screenshot: $filename" -resize $FULLSCREEN_VIEW_SIZE% "$path"
     else
         magick display -title "Screenshot: $filename" "$path"
     fi
