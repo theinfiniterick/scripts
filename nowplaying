@@ -1858,7 +1858,7 @@ def main():
             elif args.restart_daemon:
                 print("Restarting..")
 
-        with daemon.DaemonContext(pidfile=pidfile, umask=0o002, uid=os.getuid(), gid=os.getgid(), working_directory=os.getcwd(), stdout=sys.stdout, stdin=sys.stdin, stderr=sys.stderr):
+        with daemon.DaemonContext(pidfile=pidfile, umask=0o002, uid=os.getuid(), gid=os.getgid(), working_directory=os.getcwd(), stderr=sys.stderr):
             monitor_player(player, prefs)
 
     else:
