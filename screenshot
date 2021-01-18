@@ -1,103 +1,146 @@
 #!/bin/bash
 
-# Dependencies: imagemagick, xclip, xrandr, bc
-# copy = copy image to clipboard
-# save = save image to file
-# view = show image preview on creation
-# select = grab selected rectangle
-# window = grab focused window
+DEFAULT_FORMAT="png"
+DEFAULT_DIRECTORY="$HOME/images/shot"
 
-FILETYPE="png"
-PREVIEW_SIZE=60
-SAVE_DIRECTORY="/home/user/images/shot"
+VIEW_SIZE=50
+FORMATS=(png jpg gif bmp tif)
 
-# Parse command line arguments
-for arg in "$@"; do
-    case $arg in
-      "--copy"|"-c") copy=true ;;
-      "--save"|"-s") save=true ;;
-      "--view"|"-v") view=true ;;
-      "--select"|"-sel") select=true ;;
-      "--window"|"-w") window=true ;;
+if [ -n "$XDG_CACHE_HOME" ]; then
+    CACHE_DIRECTORY=$XDG_CACHE_HOME
+else
+    CACHE_DIRECTORY="$HOME/.cache"
+fi
+
+# Default arguments
+source="fullscreen"
+destination="file"
+view_image=false
+delay=0
+
+show_help() {
+
+    echo "Usage: screenshot [OPTIONS] [PATH]"
+    echo
+    echo "Content:"
+    echo "  -f, --fullscreen     Grab full screen (default)"
+    echo "  -w, --window         Grab active window"
+    echo "  -s, --selection      Grab a selection"
+    echo
+    echo "Options:"
+    echo "  -c, --clipboard      Send screenshot to clipboard"
+    echo "  -d, --delay SECONDS  Delay before screenshot"
+    echo "  -v, --view           View Screenshot"
+    echo "  -h, --help           Show this message"
+    echo
+
+    exit 0
+
+}
+
+args=$@
+# while true; do
+for a in $@; do
+    case "$1" in
+        '-h'|'--help')
+            show_help
+            shift
+            ;;
+        '-s'|'--selection')
+            source="selection"
+            shift
+            ;;
+        '-w'|'--window')
+            source="window"
+            shift
+            ;;
+        '-f'|'--fullscreen')
+            source="fullscreen"
+            shift
+            ;;
+        '-c'|'--clipboard')
+            destination="clipboard"
+            shift
+            ;;
+        '-v'|'--view')
+            view_image=true
+            shift
+            ;;
+        '-d'|'--delay')
+            delay=$2
+            shift 2
+            ;;
     esac
 done
 
-# Set image file path
-if [ $save ] || [ $view ]; then
+# Get format and path
+if [ -z "$path" ]; then
 
-    filename="$(date "+%Y-%m-%d_%H:%M:%S").$FILETYPE"
-    filepath="$SAVE_DIRECTORY/$filename"
-
-    if [ -f $filepath ]; then
-        filename="$(date "+%Y-%m-%d_%H:%M:%S.%N").$FILETYPE"
-        filepath="$SAVE_DIRECTORY/$filename"
-    fi
-
-fi
-
-# Compile imagemagick command
-if [ $select ]; then
-    cmd="import"
-elif [ $window ]; then
-    cmd="import -window \"$(xdotool getwindowfocus)\""
-else
-    cmd="import -window root"
-fi
-
-if [ $save ] || [ $view ]; then
-    cmd+=" \"$filepath\""
-fi
-
-if [ $copy ]; then
-    if [ $save ] || [ $view ]; then
-        cmd+=" | xclip -selection clipboard -t image/png"
+    if [ "$destination" == "clipboard" ]; then
+        path="$CACHE_DIRECTORY/screenshot.$DEFAULT_FORMAT"
     else
-        cmd+=" png:- | xclip -selection clipboard -t image/png"
-    fi
-fi
 
-# Run imagemagick command
-eval $cmd
+        filename="$(date "+%Y-%m-%d_%H:%M:%S").$DEFAULT_FORMAT"
+        path="$DEFAULT_DIRECTORY/$filename"
 
-# View screenshot
-if [ $view ]; then
-
-    if [ "$(which sxiv | grep -i -v 'not found' | wc -l)" == "1" ]; then
-
-        preview_size_as_float=$(echo "$PREVIEW_SIZE / 100" | bc -l)
-
-        screen_dimensions=$(xrandr --current | grep '*' | uniq | awk '{print $1}')
-        screen_width="$(cut -d 'x' -f1 <<< "$screen_dimensions")"
-        screen_height="$(cut -d 'x' -f2 <<< "$screen_dimensions")"
-
-        image_dimensions="$(identify "$filepath" | cut -d' ' -f3)"
-        image_width="$(cut -d 'x' -f1 <<< "$image_dimensions")"
-        image_height="$(cut -d 'x' -f2 <<< "$image_dimensions")"
-
-        window_width=$(printf "%.0f" $(bc -l <<< "$screen_width * $preview_size_as_float"))
-        window_height=$(printf "%.0f" $(bc -l <<< "($screen_height * $preview_size_as_float) + 15"))
-
-        if [ $image_width -lt $window_width ]; then
-            window_width=$image_width
-            window_height=$image_height
+        if [ -f $path ]; then
+            filename="$(date "+%Y-%m-%d_%H:%M:%S.%N").$DEFAULT_FORMAT"
+            path="$DEFAULT_DIRECTORY/$filename"
         fi
 
-        window_xpos=$(($((1920 - window_width)) / 2))
-        window_ypos=$(($((1080 - window_height)) / 2))
-
-        geometry="${window_width}x${window_height}+${window_xpos}+${window_ypos}"
-
-        sxiv -g "$geometry" "$filepath"
-
-    else
-
-        display -resize $PREVIEW_SIZE% "$filepath"
-
     fi
 
 fi
 
-# Remove image file if save flag is not true
-if [ ! $save ] && [ -f "$filepath" ]; then
-    rm "$filepath"
+# Validate image format
+format=$(echo $path | awk -F '.' '{print $NF}')
+
+if ! [[ " ${FORMATS[@]} " =~ " ${format} " ]]; then
+    echo "Format $format invalid."
+    exit 1
+fi
+
+# Validate destination directory exists
+directory=$(dirname "$path")
+
+if ! [ -d "$directory" ]; then
+
+    parent_directory=$(dirname "$directory")
+
+    if [ -d "$parent_directory" ]; then
+        mkdir "$directory"
+    else
+        echo "Directory $directory does not exist."
+        exit 1
+    fi
+
+fi
+
+# Delay if value is greater than zero
+if [ $delay -gt 0 ]; then
+    sleep $delay
+fi
+
+# Get screenshot
+if [ "$source" == "selection" ]; then
+    import "$path"
+elif [ "$source" == "window" ]; then
+    import -window \"$(xdotool getwindowfocus)\" "$path"
+elif [ "$source" == "fullscreen" ]; then
+    import -window root "$path"
+fi
+
+# Put screenshot image in clipboard
+if [ $destination == "clipboard" ]; then
+    xclip -selection clipboard -t image/png -i "$path"
+fi
+
+# Display screenshot preview
+if [ $view_image == true ]; then
+    display -resize $VIEW_SIZE% "$path"
+fi
+
+# Remove unwanted image file
+if [ $destination == "clipboard" ]; then
+    rm "$path"
 fi
