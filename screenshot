@@ -8,7 +8,7 @@
 DEFAULT_FORMAT="png"
 
 # Default sub-directory of images folder
-DIRECTORY_NAME="shot"
+DEFAULT_DIRECTORY="shot"
 
 # Size of image view in percentage of screen
 VIEW_SIZE=60
@@ -39,7 +39,6 @@ show_help() {
     echo "  -d, --delay SECONDS  Delay before screenshot"
     echo "  -v, --view           View Screenshot"
     echo "  -h, --help           Show this message"
-    # echo
 
     exit 0
 
@@ -86,7 +85,6 @@ base_directory() {
 
 }
 
-# for arg in $@; do
 while [ "$1" != "" ]; do
     case "$1" in
         '-h'|'--help')
@@ -144,12 +142,12 @@ if [ "$destination" == "clipboard" ]; then
 elif [ -z "$path" ]; then
 
     filename="$(date "+%Y-%m-%d_%H:%M:%S").$DEFAULT_FORMAT"
-    path="$(base_directory)/$DIRECTORY_NAME/$filename"
+    path="$(base_directory)/$DEFAULT_DIRECTORY/$filename"
 
     # If path already exists then add milliseconds to filename
     if [ -f "$path" ]; then
         filename="$(date "+%Y-%m-%d_%H:%M:%S.%N").$DEFAULT_FORMAT"
-        path="$(base_directory)/$DIRECTORY_NAME/$filename"
+        path="$(base_directory)/$DEFAULT_DIRECTORY/$filename"
     fi
 
 fi
