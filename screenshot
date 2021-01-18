@@ -156,7 +156,7 @@ if [ -z "$filename" ]; then
     filename="$(basename $path)"
 fi
 
-# if path is not absolute then set path to "$PWD/$path"
+# Validate path
 if [ "${path:0:1}" != "/" ]; then
     path="$PWD/$path"
 fi
@@ -169,7 +169,7 @@ if ! [[ " ${FORMATS[@]} " =~ " ${format} " ]]; then
     exit 1
 fi
 
-# Validate destination directory
+# Validate path directory
 directory=$(dirname "$path")
 
 if ! [ -d "$directory" ]; then
@@ -186,7 +186,7 @@ if ! [ -d "$directory" ]; then
 fi
 
 # Validate delay
-if ! [[ "$delay" =~ ^[0-9]+$ ]]; then
+if ! [[ $delay =~ ^[+-]?[0-9]*$ ]] && ! [[ $delay =~ ^[+-]?[0-9]+\.?[0-9]*$ ]]; then
     echo "Delay $delay is not valid."
     exit 1
 fi
