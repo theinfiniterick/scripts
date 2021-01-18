@@ -3,14 +3,8 @@
 DEFAULT_FORMAT="png"
 DEFAULT_DIRECTORY="$HOME/Pictures/screenshots"
 
-VIEW_SIZE=50
+VIEW_SIZE=60
 FORMATS=(png jpg gif bmp tif)
-
-if [ -n "$XDG_CACHE_HOME" ]; then
-    CACHE_DIRECTORY=$XDG_CACHE_HOME
-else
-    CACHE_DIRECTORY="$HOME/.cache"
-fi
 
 # Default arguments
 source="fullscreen"
@@ -42,27 +36,27 @@ for arg in $@; do
     case "$1" in
         '-h'|'--help')
             show_help
-            shift
+            shift 1
             ;;
         '-s'|'--selection')
             source="selection"
-            shift
+            shift 1
             ;;
         '-w'|'--window')
             source="window"
-            shift
+            shift 1
             ;;
         '-f'|'--fullscreen')
             source="fullscreen"
-            shift
+            shift 1
             ;;
         '-c'|'--clipboard')
             destination="clipboard"
-            shift
+            shift 1
             ;;
         '-v'|'--view')
             view_image=true
-            shift
+            shift 1
             ;;
         '-d'|'--delay')
             delay=$2
@@ -75,13 +69,23 @@ done
 if [ -z "$path" ]; then
 
     if [ "$destination" == "clipboard" ]; then
-        path="$CACHE_DIRECTORY/screenshot.$DEFAULT_FORMAT"
+
+        if [ -n "$XDG_CACHE_HOME" ]; then
+            directory=$XDG_CACHE_HOME
+        else
+            directory="$HOME/.cache"
+        fi
+
+        filename="screenshot.$DEFAULT_FORMAT"
+        path="$directory/$filename"
+
     else
 
         filename="$(date "+%Y-%m-%d_%H:%M:%S").$DEFAULT_FORMAT"
         path="$DEFAULT_DIRECTORY/$filename"
 
-        if [ -f $path ]; then
+        # If path already exists then add milliseconds to filename
+        if [ -f "$path" ]; then
             filename="$(date "+%Y-%m-%d_%H:%M:%S.%N").$DEFAULT_FORMAT"
             path="$DEFAULT_DIRECTORY/$filename"
         fi
@@ -119,7 +123,7 @@ if [ $delay -gt 0 ]; then
     sleep $delay
 fi
 
-# Get screenshot
+# Take screenshot
 if [ "$source" == "selection" ]; then
     import "$path"
 elif [ "$source" == "window" ]; then
@@ -142,5 +146,3 @@ fi
 if [ $destination == "clipboard" ]; then
     rm "$path"
 fi
-
-
