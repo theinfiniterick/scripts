@@ -36,7 +36,8 @@ show_help() {
     echo
     echo "Options:"
     echo "  -c, --clipboard      Send screenshot to clipboard"
-    echo "  -d, --delay SECONDS  Delay before screenshot"
+    echo "  -d SECONDS, --delay SECONDS"
+    echo "                       Delay before screenshot"
     echo "  -v, --view           View Screenshot"
     echo "  -h, --help           Show this message"
 
@@ -179,7 +180,7 @@ if ! [ -d "$directory" ]; then
     parent_owner="$(stat -c '%U' $parent_directory)"
 
     if [ -d "$parent_directory" ]; then
-        if [ "$parent_owner" != "$USER" ]; then
+        if [ "$parent_owner" != "$USER" ] && [ "$UID" != "0" ]; then
             echo "Error: cannot create directory $directory. You don't own $parent_directory."
             exit 1
         else
