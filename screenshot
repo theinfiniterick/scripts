@@ -2,13 +2,17 @@
 
 # Dependencies: imagemagick, xclip
 
+# Default image format
 DEFAULT_FORMAT="png"
-DEFAULT_DIRECTORY="$HOME/Pictures/screenshots"
 
+# Default sub-directory of images folder
+DEFAULT_DIRECTORY="shot"
+
+# Size of image view in percentage of screen
 VIEW_SIZE=60
 FORMATS=(png jpg gif bmp tif)
 
-# Default arguments
+# Default command line argument value
 source="fullscreen"
 destination="file"
 view_image=false
@@ -31,6 +35,24 @@ show_help() {
     echo
 
     exit 0
+
+}
+
+image_directory() {
+
+    if [ -n "$XDG_CONFIG_HOME" ]; then
+        config_dir=$XDG_CONFIG_HOME
+    else
+        config_dir="$HOME/.config"
+    fi
+
+    filename="$config_dir/user-dirs.dirs"
+
+    if [ -f "$filename" ]; then
+        echo "$(eval echo $(cat $filename | grep XDG_PICTURES_DIR | cut -d '=' -f2 | tr -d \"))"
+    else
+        echo "$HOME/Images"
+    fi
 
 }
 
@@ -84,12 +106,12 @@ if [ -z "$path" ]; then
     else
 
         filename="$(date "+%Y-%m-%d_%H:%M:%S").$DEFAULT_FORMAT"
-        path="$DEFAULT_DIRECTORY/$filename"
+        path="$(image_directory)/$DEFAULT_DIRECTORY/$filename"
 
         # If path already exists then add milliseconds to filename
         if [ -f "$path" ]; then
             filename="$(date "+%Y-%m-%d_%H:%M:%S.%N").$DEFAULT_FORMAT"
-            path="$DEFAULT_DIRECTORY/$filename"
+            path="$(image_directory)/$DEFAULT_DIRECTORY/$filename"
         fi
 
     fi
