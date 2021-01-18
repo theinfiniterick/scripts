@@ -1,0 +1,1874 @@
+#!/usr/bin/python
+
+import acoustid
+import argparse
+import configparser
+import daemon
+import dbus
+import gi.repository
+import magic
+import os.path
+import pulsectl
+import re
+import requests
+import signal
+import sqlite3
+import sys
+import time
+
+from collections import namedtuple
+from daemon.pidfile import PIDLockFile
+from datetime import datetime, timedelta
+from dbus.mainloop.glib import DBusGMainLoop
+from io import BytesIO
+from PIL import Image, UnidentifiedImageError
+from tinytag import TinyTag, TinyTagException
+from typing import Any, Optional, Union
+
+gi.require_version('Notify', '0.7')
+gi.require_version('GdkPixbuf', '2.0')
+from gi.repository import GdkPixbuf, Gio, GLib, Notify
+
+APP_NAME = 'nowplaying'
+
+USER_CONFIG_DIRECTORY = os.environ.get('XDG_CONFIG_HOME', os.path.join(os.path.expanduser('~'), '.config'))
+USER_MUSIC_DIRECTORY = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_MUSIC)
+
+APP_CONFIG_DIRECTORY = os.path.join(USER_CONFIG_DIRECTORY, APP_NAME)
+
+APP_CONFIG_FILENAME = 'config.ini'
+APP_CONFIG_PATH = os.path.join(APP_CONFIG_DIRECTORY, APP_CONFIG_FILENAME)
+
+APP_DATABASE_FILENAME = 'data.db'
+APP_DATABASE_PATH = os.path.join(APP_CONFIG_DIRECTORY, APP_DATABASE_FILENAME)
+
+PIDFILE_DIRECTORY = APP_CONFIG_DIRECTORY
+PIDFILE_FILENAME = f'{APP_NAME}.pid'
+PIDFILE_PATH = os.path.join(PIDFILE_DIRECTORY, PIDFILE_FILENAME)
+
+ACOUSTID_APIKEY = 'XVXy1WttXr'
+ACOUSTID_TIMEOUT = 5
+
+SPOTIFY_CLIENT_ID = '3ad71cf0ae544e7e935927e5d9a5cbad'
+SPOTIFY_CLIENT_SECRET = '862905d9380645a9ba29789308d795d5'
+
+COVER_FORMAT = 'JPEG'
+COVER_SIZE = 192
+
+PLAYER_NAMES = {'amarok': 'Amarok', 'audacious': 'Audacious', 'banshee': 'Banshee', 'cantata': 'Cantata', 'clementine': 'Clementine', 'deadbeef': 'DeaDBeeF', 'juk': 'Juk', 'Lollypop': 'Lollypop', 'mpd': 'Music Player Daemon', 'muine': 'Muine', 'pragha': 'Pragha', 'qmmp': 'Qmmp', 'quodlibet': 'Quod Libet', 'rhythmbox': 'Rhythmbox', 'songbird': 'Songbird', 'xmms2': 'XMMS2', 'vlc': 'VLC Media Player'}
+PREFERENCES = {'player': {'preferred': {'type': list, 'default': []}, 'ignore_instances': {'type': bool, 'default': False}, 'mute_ads': {'type': bool, 'default': True}, 'on_change': {'type': bool, 'default': True}, 'on_play': {'type': bool, 'default': True}}, 'acoustid': {'api_key': {'type': str, 'default': ACOUSTID_APIKEY}, 'timeout': {'type': int, 'default': ACOUSTID_TIMEOUT}}, 'database': {'path': {'type': str, 'default': APP_DATABASE_PATH}, 'save_all': {'type': bool, 'default': False}, 'save_remote': {'type': bool, 'default': True}}, 'notifier': {'id': {'type': int, 'default': None}, 'timeout': {'type': int, 'default': None}, 'urgency': {'type': str, 'default': 0}, 'default_cover': {'type': str, 'default': None}}, 'spotify': {'client_id': {'type': str, 'default': SPOTIFY_CLIENT_ID}, 'client_secret': {'type': str, 'default': SPOTIFY_CLIENT_SECRET}, 'market': {'type': str, 'default': None}}}
+URL_PATTERN = r'^(http:\/\/www\.|https:\/\/www\.|http:\/\/|https:\/\/)?[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,5}(:[0-9]{1,5})?(\/.*)?$'
+
+Preferences = namedtuple('Preferences', PREFERENCES.keys())
+
+
+class Cover(object):
+
+    def __init__(self, source: str, desc: str, as_bytes: bytes, format: Optional[str] = COVER_FORMAT, size: Optional[int] = COVER_SIZE):
+
+        object.__setattr__(self, '_mutable', True)
+
+        if not isinstance(desc, str):
+            raise TypeError("Cover desc {} is not a string.".format(desc))
+
+        if not isinstance(source, str):
+            raise TypeError("Cover source {} is not a string.".format(source))
+
+        if not isinstance(as_bytes, bytes):
+            raise TypeError("Cover as_bytes {} is not bytes.".format(as_bytes))
+
+        if not isinstance(format, str):
+            raise TypeError("Cover format {} is not a string.".format(format))
+        elif format not in ('JPEG', 'PNG'):
+            raise ValueError("Cover format {} is not valid.".format(format))
+
+        if not isinstance(size, int):
+            raise TypeError("Cover size {} is not an integer.".format(size))
+
+        self._source = source
+        self._desc = desc
+
+        self._format = format
+        self._size = size
+
+        if source == 'database':
+            self._as_bytes = as_bytes
+        else:
+            self._as_bytes = self._resize(as_bytes)
+
+        try:
+            input_stream = Gio.MemoryInputStream.new_from_data(self._as_bytes, None)
+            self._pixbuf = GdkPixbuf.Pixbuf.new_from_stream(input_stream, None)
+        except TypeError:
+            self._pixbuf = None
+
+        object.__setattr__(self, '_mutable', False)
+
+    def __repr__(self):
+        if self.is_valid:
+            return 'Cover(source=\'{}\', bytes={})'.format(self._source, len(self))
+        else:
+            return 'Cover(Invalid)'
+
+    def __setattr__(self, key, value):
+        if self._mutable:
+            object.__setattr__(self, key, value)
+        else:
+            raise AttributeError("can't set attribute")
+
+    def __delattr__(self, key):
+        if self._mutable:
+            object.__delattr__(self, key)
+        else:
+            raise AttributeError("can't delete attribute")
+
+    def __bool__(self):
+        return self.is_valid
+
+    def __len__(self):
+        return len(self._as_bytes) if self.is_valid else 0
+
+    @property
+    def is_valid(self):
+        return isinstance(self._as_bytes, bytes) and isinstance(self._pixbuf, GdkPixbuf.Pixbuf)
+
+    @property
+    def source(self):
+        return self._source
+
+    @property
+    def desc(self):
+        return self._desc
+
+    @property
+    def format(self):
+        return self._format
+
+    @property
+    def size(self):
+        return self._size
+
+    @property
+    def as_bytes(self):
+        return self._as_bytes
+
+    @property
+    def pixbuf(self):
+        return self._pixbuf
+
+    def _resize(self, image_bytes: bytes) -> bytes:
+
+        mode = 'RGBA' if self._format == 'PNG' else 'RGB'
+
+        try:
+            image = Image.open(BytesIO(image_bytes)).convert(mode)
+        except UnidentifiedImageError:
+            return None
+
+        image.thumbnail((self._size, self._size))
+
+        input_stream = BytesIO()
+        image.save(input_stream, format=self._format)
+
+        return input_stream.getvalue()
+
+
+class Tags(dict):
+
+    TAGS = ('album', 'albumArtist', 'artist', 'contentCreated', 'discNumber', 'title', 'trackNumber')
+    REPAIR = ('album', 'albumArtist', 'artist', 'title')
+    REQUIRED = ('album', 'artist', 'title')
+    BAD_VALUES = ('', 'None', None)
+
+    def __init__(self, data: Optional[dict] = None, source: Optional[str] = None):
+
+        self._sources = []
+
+        if data:
+            self.set(data, source)
+
+    def __setitem__(self, key: str, value: Union[int, str]):
+        if key in self.TAGS and value not in self.BAD_VALUES:
+            if key in self.REPAIR:
+                super().__setitem__(key, self.repair(value))
+            else:
+                super().__setitem__(key, value)
+
+    @property
+    def has_required(self):
+        return self.keys() >= set(self.REQUIRED)
+
+    @property
+    def sources(self):
+        return self._sources
+
+    @sources.setter
+    def sources(self, value: Union[str, list]):
+        if isinstance(value, str):
+            self._sources = [value]
+        elif isinstance(value, list):
+            self._sources = value
+
+    def set(self, data: dict, source: Optional[str] = None):
+
+        self._sources.clear()
+        self.clear()
+
+        source_used = False
+        for key, value in data.items():
+            if key in self.TAGS and value not in self.BAD_VALUES:
+                source_used = True
+                self[key] = value
+
+        if source and source_used:
+            self._sources.append(source)
+
+    def append(self, data: dict, source: Optional[str] = None):
+
+        source_used = False
+        for key, value in data.items():
+            if key in self.TAGS and value not in self.BAD_VALUES and key not in self.keys():
+                source_used = True
+                self[key] = value
+
+        if source and source_used:
+            self._sources.append(source)
+
+    @staticmethod
+    def repair(value: str):
+
+        REPAIR_WORDS = ('[0-9]{1,3}(st|nd|rd|th)', '(19|20)[0-9]{2}', '45', 'Album', 'Anniversary', 'Bonus', 'Cassette', 'CD', 'Collector\'s', 'Deluxe', 'Digital', 'Distribution', 'Double', 'Edition', 'Enhanced', 'EP', 'Expanded', 'Issue', 'Limited', 'LP', 'Remaster', 'Remastered', 'Sampler', 'Special', 'Single', 'Super', 'The', 'Track', 'U.S.', 'Version', 'Vinyl')
+        REPAIR_PHRASES = ('Bonus', 'Bonus Tracks', 'Bonus Edition', 'Box Set', 'Expanded', 'Greatest Hits', 'Mono', 'Reissue', 'Remaster', 'Remastered', 'Single Mix', 'Stereo', 'Unknown')
+
+        word_pattern = r'({})'.format('|'.join(REPAIR_WORDS))
+
+        inner_text = [r'{0}.*{0}'.format(word_pattern)]
+
+        for inner_pattern in (inner_text + list(REPAIR_PHRASES)):
+
+            patterns = [
+                r'\s*\({0}\)$'.format(inner_pattern),
+                r'\s*\[{0}\]$'.format(inner_pattern),
+                r'\s*\-\s+{0}$'.format(inner_pattern),
+                r':\s+{0}$'.format(inner_pattern)
+            ]
+
+            for pattern in patterns:
+
+                regex = re.compile(pattern, flags=re.IGNORECASE)
+                if regex.search(value):
+                    return regex.sub('', value)
+
+        return value
+
+
+class Track(object):
+
+    def __init__(self, source: str, data: Optional[dict] = None, url: Optional[str] = None, cover: Optional[Cover] = None):
+
+        if not url and 'url' not in data:
+            raise TypeError("Track missing url")
+
+        self._url = url or data['url']
+
+        if self._url.startswith('file://'):
+            self._path = self._url[7:]
+        elif self._url.startswith('/'):
+            self._path = self._url
+        else:
+            self._path = None
+
+        if self._path and not os.path.isfile(self._path):
+            raise FileNotFoundError("Track \"{}\" does not exist".format(self._path))
+
+        if data:
+            self._tags = Tags(data, source)
+        else:
+            self._tags = Tags()
+
+        if cover:
+            self._cover = cover
+        elif data and 'artUrl' in data:
+            if data['artUrl'].startswith('file://'):
+                image_bytes = get_bytes_from_path(data['artUrl'][7:])
+            elif data['artUrl'].startswith('/'):
+                image_bytes = get_bytes_from_path(data['artUrl'])
+            else:
+                image_bytes = get_bytes_from_url(data['artUrl'])
+
+            if image_bytes:
+                self._cover = Cover(source, data['artUrl'], image_bytes)
+            else:
+                self._cover = None
+        else:
+            self._cover = None
+
+    def __repr__(self):
+        if self.path:
+            return "Track(is_complete={}, path=\"{}\")".format(self.is_complete, self.path)
+        else:
+            return "Track(is_complete={}, url=\"{}\")".format(self.is_complete, self.url)
+
+    @property
+    def is_complete(self):
+        return self._tags.has_required is True and self.cover is not None
+
+    @property
+    def path(self):
+        return self._path
+
+    @property
+    def url(self):
+        return self._url
+
+    @property
+    def is_local(self):
+        return self._path is not None
+
+    @property
+    def is_remote(self):
+        return self._path is None
+
+    @property
+    def tags(self):
+        return self._tags
+
+    @property
+    def cover(self):
+        return self._cover
+
+    @cover.setter
+    def cover(self, value: Cover):
+        if not isinstance(value, Cover):
+            raise TypeError("{} is not a valid Cover".format(value))
+        self._cover = value
+
+
+class AudioFile(object):
+
+    def __init__(self, path: str):
+
+        if path.startswith('file://'):
+            self._path = path[7:]
+        else:
+            self._path = path
+
+        if not os.path.isfile(self._path):
+            raise FileNotFoundError("\"{}\" does not exist.".format(self._path))
+
+        self._filename = os.path.basename(path)
+        self._mimetype = magic.Magic(mime=True).from_file(self._path)
+
+        if self._mimetype.split('/')[0] != 'audio':
+            raise LookupError("\"{}\" is not a valid audio file.".format(self._path))
+
+    def __repr__(self):
+        return "AudioFile(\"{}\")".format(self._filename)
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    @property
+    def filename(self) -> str:
+        return self._filename
+
+    @property
+    def mimetype(self) -> str:
+        return self._mimetype
+
+    def get_metadata(self) -> Optional[dict]:
+
+        try:
+            tag_data = TinyTag.get(self._path).as_dict()
+        except TinyTagException:
+            return None
+
+        tags = {
+            'album': {
+                'name': 'album',
+                'type': str
+            },
+            'albumartist': {
+                'name': 'albumArtist',
+                'type': str
+            },
+            'artist': {
+                'name': 'artist',
+                'type': str
+            },
+            'year': {
+                'name': 'contentCreated',
+                'type': str
+            },
+            'disc': {
+                'name': 'discNumber',
+                'type': int
+            },
+            'title': {
+                'name': 'title',
+                'type': str
+            },
+            'track': {
+                'name': 'trackNumber',
+                'type': int
+            }
+        }
+
+        data = {}
+        for key, value in tag_data.items():
+
+            if key in tags and value:
+
+                tagname = tags[key]['name']
+                tagtype = tags[key]['type']
+
+                data[tagname] = tagtype(value)
+
+        return data
+
+    def get_cover(self, search_depth: Optional[int] = 1):
+
+        def embed_cover() -> Optional[Cover]:
+            try:
+                image_bytes = TinyTag.get(self._path, image=True).get_image()
+                if image_bytes:
+                    return Cover('embed', self._path, image_bytes)
+            except TinyTagException:
+                return None
+
+        def local_cover() -> Optional[str]:
+
+            FILENAMES = ('cover', 'Cover', 'folder', 'Folder', 'front', 'Front', 'thumb', 'Thumb', 'album', 'Album', 'albumart', 'Albumart', 'AlbumArt', 'albumartsmall', 'Albumartsmall', 'AlbumArtsmall', 'AlbumArtSmall')
+            EXTENSIONS = ('jpg', 'png', 'bmp', 'jpe', 'jpeg', 'gif', 'tif', 'tiff')
+
+            folder = os.path.dirname(self._path)
+
+            for index in range(search_depth):
+                for filename in FILENAMES:
+                    for extension in EXTENSIONS:
+                        path = "{}/{}.{}".format(folder, filename, extension)
+                        if os.path.isfile(path):
+                            return Cover('file', path, get_bytes_from_path(path))
+
+                folder = os.path.dirname(folder)
+
+        return embed_cover() or local_cover()
+
+    def parse_filename(self, assume_field: Optional[str] = 'artist') -> dict:
+
+        unknown_keys = ['artist', 'album', 'title']
+
+        split_pattern = r'\s+-\s+|(?<=^\d{1})\.\s+|(?<=^\d{2})\.\s+|(?<=\s{1}\d{1})\.\s+|(?<=\s{1}\d{2})\.\s+'
+        split_string = os.path.splitext(os.path.basename(self._path))[0]
+
+        unknown_values = re.split(split_pattern, split_string)
+
+        known_items = {}
+
+        # parse track number from unknown_values and assign it to known_items
+        tracknumber_in_filename = False
+        for index, value in reversed(list(enumerate(unknown_values))):
+            if value.isnumeric() and len(value) <= 2:
+                tracknumber_in_filename = True
+                known_items['trackNumber'] = str(int(unknown_values.pop(index)))
+                break
+
+        # replace underscores in unknown_values with spaces
+        for index, value in enumerate(unknown_values):
+            unknown_values[index] = re.sub('_', ' ', value)
+
+        if len(unknown_keys) > len(unknown_values) and 'artist' in unknown_keys and 'album' in unknown_keys:
+            if assume_field == 'artist':
+                unknown_keys.remove('album')
+            elif assume_field == 'album':
+                unknown_keys.remove('artist')
+            elif tracknumber_in_filename:
+                unknown_keys.remove('artist')
+            else:
+                unknown_keys.remove('album')
+
+        # assign unknown_keys & unknown_values to known_items
+        for index, value in reversed(list(enumerate(unknown_values))):
+            known_items[unknown_keys.pop()] = value
+
+        return known_items
+
+    def fingerprint(self, apikey: Optional[str] = 'ki1pVusVKAE', timeout: Optional[int] = 5, minimum_score: Optional[float] = 0.75) -> Optional[dict]:
+
+        try:
+            results = acoustid.match(apikey=apikey, path=self._path, meta='recordings', parse=True, timeout=timeout)
+        except acoustid.NoBackendError:
+            print("chromaprint library/tool not found", file=sys.stderr)
+            sys.exit(1)
+        except acoustid.FingerprintGenerationError:
+            print("fingerprint could not be calculated", file=sys.stderr)
+            sys.exit(1)
+        except acoustid.WebServiceError as exc:
+            print("web service request failed:", exc.message, file=sys.stderr)
+            sys.exit(1)
+
+        for score, recording_id, title, artist in results:
+            if score >= minimum_score:
+                return {'score': score, 'recording_id': recording_id, 'title': title, 'artist': artist}
+            else:
+                return None
+
+
+class SpotifyAPI(object):
+
+    MARKET_CODES = ('AD', 'AR', 'AU', 'AT', 'BE', 'BO', 'BR', 'BG', 'CA', 'CL', 'CO', 'CR', 'CY', 'CZ', 'DK', 'DO', 'EC', 'SV', 'EE', 'FI', 'FR', 'DE', 'GR', 'GT', 'HN', 'HK', 'HU', 'IS', 'ID', 'IE', 'IT', 'JP', 'LV', 'LI', 'LT', 'LU', 'MY', 'MT', 'MX', 'MC', 'NL', 'NZ', 'NI', 'NO', 'PA', 'PY', 'PE', 'PH', 'PL', 'PT', 'SG', 'ES', 'SK', 'SE', 'CH', 'TW', 'TR', 'GB', 'US', 'UY')
+
+    def __init__(self, client_id: str, client_secret: str, market: Optional[str] = None):
+
+        if market and market not in self.MARKET_CODES:
+            raise TypeError("Spotify market \"{}\" not valid".format(market))
+
+        self._client_id = client_id
+        self._client_secret = client_secret
+        self._market = market
+
+        self._update_auth_token()
+
+    def __repr__(self):
+        return "SpotifyAPI(market='{}', token_expires_in={})".format(self._market, self.token_expires_in)
+
+    def close(self):
+        pass
+
+    @property
+    def token(self):
+        return self._token
+
+    @property
+    def token_expires_in(self):
+        return int((self._token['expire_timestamp'] - datetime.now()).total_seconds())
+
+    def _update_auth_token(self):
+
+        response = requests.post(
+            'https://accounts.spotify.com/api/token',
+            data={
+                'grant_type': 'client_credentials',
+                'client_id': self._client_id,
+                'client_secret': self._client_secret
+            },
+            headers={
+                'Accept': 'application/json'
+            }
+        )
+
+        if response.status_code == 200:
+
+            timestamp = datetime.now()
+
+            data = response.json()
+
+            self._token = {
+                'create_timestamp': timestamp,
+                'expire_timestamp': timestamp + timedelta(seconds=data['expires_in']),
+                'value': data['access_token'],
+                'duration': data['expires_in']
+            }
+
+    def _query_api(self, url: str):
+
+        if self.token_expires_in < 60:
+            self._update_auth_token()
+
+        response = requests.get(
+            url,
+            params={
+                'offset': '0',
+                'limit': '1',
+                'market': self._market
+            },
+            headers={
+                'Accept': 'application/json',
+                'Authorization': 'Bearer {}'.format(self._token['value']),
+                'Content-Type': 'application/json'
+            }
+        )
+
+        if response.status_code == 200:
+            return response.json()
+
+    def search_track(self, artist: str, track: str, album: Optional[str] = None, date: Optional[str] = None):
+
+        def get_url():
+
+            strip_pattern = re.compile(r"\s+\((with|featuring|feat(\.)?|ft(\.)?)\s+.*\)$|\'")
+
+            query = "artist:\"{}\" AND track:\"{}\"".format(strip_pattern.sub('', artist), strip_pattern.sub('', track))
+
+            if album:
+                query += " AND album:\"{}\"".format(strip_pattern.sub('', album))
+
+            if date and re.match(r'^(19|20)[0-9]{2}.*$', date):
+                year = date[4:]
+                query += " AND year:\"{}-{}\"".format(int(year) - 1, int(year) + 1)
+
+            return "https://api.spotify.com/v1/search?q={}&type=track".format(requests.utils.quote(query))
+
+        results = self._query_api(get_url())
+
+        if results['tracks']['total'] == 0:
+            return None
+
+        track = results['tracks']['items'][0]
+
+        if results:
+
+            data = {
+                'url': track['external_urls']['spotify'],
+                'title': track['name'],
+                'trackNumber': track['track_number'],
+                'discNumber': track['disc_number'],
+                'artist': track['artists'][0]['name'],
+                'albumArtist': track['album']['artists'][0]['name'],
+                'album': track['album']['name'],
+                'contentCreated': track['album']['release_date']
+            }
+
+            image_url = track['album']['images'][1]['url']
+            image_bytes = get_bytes_from_url(image_url)
+
+            cover = Cover(source='spotify_api', desc=image_url, as_bytes=image_bytes)
+
+            return Track(source='spotify_api', data=data, cover=cover)
+
+
+class Database(object):
+
+    TABLES = ('artists', 'albums', 'tracks', 'covers')
+
+    def __init__(self, path: str):
+
+        self._path = path
+        self._conn = sqlite3.connect(path)
+
+        if not self.is_connected:
+            raise ConnectionError("Connection to \"{}\" failed".format(self._path))
+
+        if self.tables != self.TABLES:
+            self.create_tables()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    @property
+    def path(self):
+        return self._path
+
+    @property
+    def conn(self):
+        return self._conn
+
+    def close(self):
+        self._conn.close()
+
+    @property
+    def tables(self) -> list:
+        result = self._conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        return tuple([r[0] for r in result.fetchall()])
+
+    @property
+    def track_count(self):
+        result = self._conn.execute("SELECT count(*) FROM tracks;")
+        return result.fetchone()
+
+    @property
+    def is_connected(self) -> bool:
+
+        try:
+            self._conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            self._conn.commit()
+        except sqlite3.OperationalError:
+            return False
+
+        return True
+
+    def create_tables(self):
+
+        query = """
+            CREATE TABLE IF NOT EXISTS "artists" (
+                "id"	INTEGER NOT NULL,
+                "name"	TEXT NOT NULL UNIQUE,
+                PRIMARY KEY("id")
+            );
+            CREATE TABLE IF NOT EXISTS "albums" (
+                "id"	INTEGER NOT NULL,
+                "artist_id"	INTEGER NOT NULL,
+                "cover_id"	INTEGER NOT NULL,
+                "name"	TEXT NOT NULL,
+                "content_created"	TEXT,
+                PRIMARY KEY("id"),
+                FOREIGN KEY("artist_id") REFERENCES "artists"("id"),
+                UNIQUE("artist_id","name")
+            );
+            CREATE TABLE IF NOT EXISTS "tracks" (
+                "id"	INTEGER NOT NULL,
+                "album_id"	INTEGER NOT NULL,
+                "artist_id"	INTEGER,
+                "url"	TEXT NOT NULL,
+                "title"	TEXT NOT NULL,
+                "track_number"	INTEGER,
+                "disc_number"	INTEGER,
+                UNIQUE("album_id","title"),
+                PRIMARY KEY("id"),
+                FOREIGN KEY("album_id") REFERENCES "albums"("id")
+            );
+            CREATE TABLE IF NOT EXISTS "covers" (
+                "id"	INTEGER NOT NULL UNIQUE,
+                "source"	TEXT NOT NULL,
+                "desc"	TEXT NOT NULL,
+                "bytes"	BLOB NOT NULL,
+                PRIMARY KEY("id"),
+                UNIQUE("source","desc")
+            );
+            """
+
+        self._conn.executescript(query)
+        self._conn.commit()
+
+    def delete_database(self):
+        self.close()
+        os.remove(self._path)
+
+    def delete_tables(self):
+
+        query = """
+            BEGIN TRANSACTION;
+                DROP TABLE IF EXISTS tracks;
+                DROP TABLE IF EXISTS albums;
+                DROP TABLE IF EXISTS covers;
+                DROP TABLE IF EXISTS artists;
+            COMMIT;
+            """
+
+        self._conn.executescript(query)
+        self._conn.commit()
+
+    def delete_records(self):
+
+        query = """
+            BEGIN TRANSACTION;
+                DELETE FROM tracks;
+                DELETE FROM albums;
+                DELETE FROM covers;
+                DELETE FROM artists;
+            COMMIT;
+            """
+
+        self._conn.executescript(query)
+        self._conn.commit()
+
+    def delete_tracks(self):
+
+        query = "DELETE FROM tracks;"
+
+        self._conn.execute(query)
+        self._conn.commit()
+
+    def delete_albums(self):
+
+        query = "DELETE FROM albums;"
+
+        self._conn.execute(query)
+        self._conn.commit()
+
+    def delete_covers(self):
+
+        query = "DELETE FROM covers;"
+
+        self._conn.execute(query)
+        self._conn.commit()
+
+    def delete_artists(self):
+
+        query = "DELETE FROM artists;"
+
+        self._conn.execute(query)
+        self._conn.commit()
+
+    def get_track(self, url: str):
+
+        def dict_factory(cursor, row):
+            return {column[0]: row[index] for index, column in enumerate(cursor.description) if row[index]}
+
+        cursor = self._conn.cursor()
+        cursor.row_factory = dict_factory
+
+        result = cursor.execute(
+            """
+            SELECT
+                tracks.title as title,
+                tracks.track_number as trackNumber,
+                tracks.disc_number as discNumber,
+                albums.name as album,
+                albums.content_created as contentCreated,
+                artists.name as artist,
+                album_artists.name as albumArtist,
+                covers.bytes as coverBytes,
+                covers.source as coverSource,
+                covers.desc as coverDesc
+            FROM
+                tracks
+            INNER JOIN
+                artists ON (artists.id = tracks.artist_id)
+            INNER JOIN
+                artists album_artists ON (album_artists.id = albums.artist_id)
+            INNER JOIN
+                albums ON (tracks.album_id = albums.id)
+            INNER JOIN
+                covers ON (albums.cover_id = covers.id)
+            WHERE
+                tracks.url = ?
+            """,
+            (url,)
+        ).fetchone()
+
+        if result:
+            result['url'] = url
+
+            if url.startswith('file://'):
+                result['path'] = url[7:]
+            elif url.startswith('/'):
+                result['path'] = url
+
+            track = Track(source='database', data=result)
+
+            track.cover = Cover(source=result['coverSource'], desc=result['coverDesc'], as_bytes=result['coverBytes'])
+
+            return track
+
+    def save_track(self, track: Track):
+
+        if not track.tags.has_required or not track.cover:
+            return None
+
+        cursor = self._conn.cursor()
+
+        # Insert Artist
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO
+                artists (name)
+                VALUES (?);
+            """,
+            (track.tags.get('artist'),)
+        )
+
+        # Get Artist ID
+        artist_id = cursor.execute(
+            """
+            SELECT id
+            FROM artists
+            WHERE name = ?;
+            """,
+            (track.tags.get('artist'),)
+        ).fetchone()[0]
+
+        album_artist = track.tags.get('albumArtist', track.tags.get('artist'))
+
+        # Insert Album Artist
+        cursor.execute(
+            """INSERT OR IGNORE INTO artists (name) VALUES (?);""",
+            (album_artist,)
+        )
+
+        # Get Album Artist ID
+        album_artist_id = cursor.execute(
+            """
+            SELECT id
+            FROM artists
+            WHERE name = ?;
+            """,
+            (album_artist,)
+        ).fetchone()[0]
+
+        # Insert Cover
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO
+                covers (source, desc, bytes)
+                VALUES (?, ?, ?);
+            """,
+            (track.cover.source, track.cover.desc, track.cover.as_bytes)
+        )
+
+        # Get Cover ID
+        cover_id = cursor.execute(
+            """
+            SELECT id
+            FROM covers
+            WHERE source = ?
+            AND desc = ?;
+            """,
+            (track.cover.source, track.cover.desc)
+        ).fetchone()[0]
+
+        # Insert Album
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO
+                albums (artist_id, cover_id, name, content_created)
+                VALUES (?, ?, ?, ?);
+            """,
+            (album_artist_id, cover_id, track.tags.get('album'), track.tags.get('contentCreated'))
+        )
+
+        # Get Album ID
+        album_id = cursor.execute(
+            """
+            SELECT id
+            FROM albums
+            WHERE artist_id = ?
+            AND name = ?;
+            """,
+            (album_artist_id, track.tags.get('album'))
+        ).fetchone()[0]
+
+        # Insert Track
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO
+                tracks (
+                    url,
+                    album_id,
+                    artist_id,
+                    title,
+                    track_number,
+                    disc_number
+                )
+                VALUES (?, ?, ?, ?, ?, ?);
+            """,
+            (track.url, album_id, artist_id, track.tags.get('title'), track.tags.get('trackNumber'), track.tags.get('discNumber'))
+        )
+
+        # Get Track ID
+        result = cursor.execute(
+            """
+            SELECT id
+            FROM tracks
+            WHERE url = ?;
+            """,
+            (track.url,)
+        ).fetchone()
+
+        # Commit Changes
+        self._conn.commit()
+
+        # Return Track ID
+        if result:
+            return result[0]
+
+
+class Notifier(object):
+
+    def __init__(self, prefs: Preferences, identity: Optional[str] = None, desktop_entry: Optional[str] = None):
+
+        # Notify object
+        self.id = prefs.notifier.ID
+        self.timeout = prefs.notifier.TIMEOUT
+        self.urgency = prefs.notifier.URGENCY
+
+        # Default cover image
+        if prefs.notifier.DEFAULT_COVER and os.path.isfile(prefs.notifier.DEFAULT_COVER):
+            with open(prefs.notifier.DEFAULT_COVER) as file:
+                image_bytes = file.read()
+            self.default_cover = image_bytes
+        else:
+            self.default_cover = None
+
+        # Player
+        self.identity = identity
+        self.desktop_entry = desktop_entry
+
+        self.create()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, args):
+        self.close()
+
+    def create(self):
+
+        Notify.init(APP_NAME)
+
+        if self.desktop_entry:
+            obj = Notify.Notification.new('<summary>', '<content>', icon=self.desktop_entry)
+        else:
+            obj = Notify.Notification.new('<summary>', '<content>', icon='music')
+
+        if self.id:
+            obj.props.id = self.id
+
+        if self.urgency:
+            obj.set_urgency(self.urgency)
+
+        if self.timeout:
+            obj.set_timeout(self.timeout)
+
+        if self.desktop_entry:
+            obj.set_hint('desktop-entry', GLib.Variant('s', self.desktop_entry))
+
+        self.obj = obj
+
+    def close(self):
+        self.obj.close()
+
+    def show(self, track: Track) -> None:
+
+        def content_string(tags) -> str:
+
+            message = ""
+
+            if 'album' in tags:
+
+                message += "on {}".format(tags['album'])
+
+                if 'contentCreated' in tags:
+                    message += " ({})".format(tags['contentCreated'][:4])
+
+            if 'artist' in tags:
+
+                if message != "":
+                    message += "\n"
+
+                message += "by {}".format(tags['artist'])
+
+            return message
+
+        if not track or not track.tags or not track.tags.has_required:
+            return None
+
+        summary = track.tags['title']
+        content = content_string(track.tags)
+
+        if self.desktop_entry:
+            self.obj.update(summary, content, icon=self.desktop_entry)
+        else:
+            self.obj.update(summary, content, icon='music')
+
+        image_bytes = None
+        if track.cover and isinstance(track.cover.as_bytes, bytes):
+            image_bytes = track.cover.as_bytes
+        elif self.default_cover:
+            image_bytes = self.default_cover
+
+        if image_bytes:
+            input_stream = Gio.MemoryInputStream.new_from_data(image_bytes, None)
+            self.obj.set_image_from_pixbuf(GdkPixbuf.Pixbuf.new_from_stream(input_stream, None))
+
+        self.obj.show()
+
+
+class Player(object):
+
+    OBJECT_PATH = '/org/mpris/MediaPlayer2'
+
+    BUS_DAEMON_PATH = dbus.BUS_DAEMON_PATH
+    BUS_DAEMON_IFACE = dbus.BUS_DAEMON_IFACE
+
+    MEDIAPLAYER_IFACE = 'org.mpris.MediaPlayer2'
+    PLAYER_IFACE = 'org.mpris.MediaPlayer2.Player'
+    PROPERTIES_IFACE = dbus.PROPERTIES_IFACE
+
+    def __init__(self, player_name: str, prefs: Preferences):
+
+        if not isinstance(player_name, str):
+            sys.exit("player_name is not a valid string.")
+
+        if not isinstance(prefs, Preferences):
+            sys.exit("prefs is not valid.")
+
+        self.is_muted = False
+        self.is_muted_for_ad = False
+        self.pre_mute_volume = None
+
+        self.bus = dbus.SessionBus(mainloop=DBusGMainLoop())
+
+        self.active_player = player_name
+        self.requested_bus_name = 'org.mpris.MediaPlayer2.{}'.format(self.active_player)
+
+        self.notifier = Notifier(prefs=prefs, identity=self.identity, desktop_entry=self.desktop_entry)
+        self.database = Database(path=prefs.database.PATH)
+
+        self.spotify = SpotifyAPI(client_id=prefs.spotify.CLIENT_ID, client_secret=prefs.spotify.CLIENT_SECRET, market=prefs.spotify.MARKET)
+
+        self.prefs = prefs
+
+        try:
+            self.proxy = self.bus.get_object(self.requested_bus_name, self.OBJECT_PATH)
+        except dbus.exceptions.DBusException:
+            sys.exit("Player {} not found.".format(self.active_player))
+        else:
+
+            # Get Assigned Bus Name
+            self.bus_name = str(self.proxy.bus_name)
+
+            # Get Proxy Object
+            self.proxy = self.bus.get_object(self.requested_bus_name, self.OBJECT_PATH)
+
+            # Interfaces
+            self.properties_interface = dbus.Interface(self.proxy, dbus_interface=self.PROPERTIES_IFACE)
+            self.mediaplayer_interface = dbus.Interface(self.proxy, dbus_interface=self.MEDIAPLAYER_IFACE)
+            self.player_interface = dbus.Interface(self.proxy, dbus_interface=self.PLAYER_IFACE)
+
+            # PulseAudio Control
+            self.pulse = pulsectl.Pulse(APP_NAME)
+            self.pulse_sink = self.get_pulse_sink(self.identity)
+
+            # Set Initial Values For Last Playback Status and Last TrackID
+            self.last_status = self.playback_status
+            self.last_url = self.url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def close(self):
+        self.database.close()
+        self.notifier.close()
+        self.pulse.close()
+        self.bus.close()
+
+    def convert_dbus(self, dbus_value: Any):
+
+        if isinstance(dbus_value, dbus.Byte):
+            return bytes(dbus_value)
+        elif isinstance(dbus_value, dbus.ByteArray):
+            return bytearray(dbus_value)
+        elif isinstance(dbus_value, dbus.Boolean):
+            return bool(dbus_value)
+        elif isinstance(dbus_value, dbus.Double):
+            return float(dbus_value)
+        elif isinstance(dbus_value, (dbus.Int16, dbus.Int32, dbus.Int64, dbus.UInt16, dbus.UInt32, dbus.UInt64)):
+            return int(dbus_value)
+        elif isinstance(dbus_value, (dbus.String, dbus.ObjectPath)):
+            return str(dbus_value)
+        elif isinstance(dbus_value, (dbus.Array, dbus.Struct)):
+            return [self.convert_dbus(val) for val in list(dbus_value)] or []
+        elif isinstance(dbus_value, dbus.Dictionary):
+            return {self.convert_dbus(key): self.convert_dbus(val) for key, val in dict(dbus_value).items() if self.convert_dbus(val)} or {}
+
+    def get_property(self, interface: str, property: str):
+
+        if not hasattr(self, 'proxy'):
+            return None
+
+        try:
+            return self.convert_dbus(self.proxy.Get(interface, property, dbus_interface=self.PROPERTIES_IFACE))
+        except dbus.exceptions.DBusException:
+            return None
+
+    def get_properties(self, interface: str):
+
+        if not hasattr(self, 'proxy'):
+            return None
+
+        try:
+            return {str(key): self.convert_dbus(value) for key, value in self.proxy.GetAll(interface, dbus_interface=self.PROPERTIES_IFACE).items()}
+        except dbus.exceptions.DBusException:
+            return None
+
+    def set_property(self, interface: str, property: str, value: Any):
+
+        if not hasattr(self, 'proxy'):
+            return None
+
+        try:
+            self.proxy.Set(interface, property, value, dbus_interface=self.PROPERTIES_IFACE)
+        except dbus.exceptions.DBusException:
+            return None
+
+    @property
+    def players(self):
+        return [re.sub(r'org\.mpris\.MediaPlayer2\.', '', str(service)) for service in self.bus.list_names() if str(service).startswith('org.mpris.MediaPlayer2')]
+
+    def change(self, name: str):
+        if name in self.players:
+            self.__init__(name)
+        else:
+            print('Player \'{}\' not found.'.format(name))
+
+    def reconnect(self):
+        self.__init__(self.active_player)
+
+    @property
+    def is_connected(self):
+        return self.get_property(self.MEDIAPLAYER_IFACE, 'Identity') is not None
+
+    @property
+    def can_quit(self):
+        return self.get_property(self.MEDIAPLAYER_IFACE, 'CanQuit')
+
+    @property
+    def can_raise(self):
+        return self.get_property(self.MEDIAPLAYER_IFACE, 'CanRaise')
+
+    @property
+    def desktop_entry(self):
+        return self.get_property(self.MEDIAPLAYER_IFACE, 'DesktopEntry')
+
+    @property
+    def identity(self):
+        return self.get_property(self.MEDIAPLAYER_IFACE, 'Identity')
+
+    def quit(self):
+        if self.can_quit:
+            self.proxy.get_dbus_method('Quit')()
+
+    def raise_(self):
+        if self.can_raise:
+            self.proxy.get_dbus_method('Raise')()
+
+    @property
+    def metadata(self):
+
+        metadata = self.get_property(self.PLAYER_IFACE, 'Metadata')
+
+        if not metadata:
+            return {}
+
+        data = {}
+        for key, value in metadata.items():
+
+            key = key[6:]
+
+            if isinstance(value, list):
+                value = ', '.join(value)
+
+            if key in ('url', 'artUrl'):
+                value = requests.utils.unquote(value)
+
+            if key == 'artUrl' and re.search('open.spotify.com', value):
+                value = re.sub('open.spotify.com', 'i.scdn.co', value)
+
+            data[key] = value
+
+        return data
+
+    @property
+    def volume(self):
+        return self.get_property(self.PLAYER_IFACE, 'Volume')
+
+    @volume.setter
+    def volume(self, value: float):
+        self.set_property(self.PLAYER_IFACE, 'Volume', value)
+
+    def get_pulse_sink(self, name):
+        for sink in self.pulse.sink_input_list():
+            if sink.proplist['application.name'] == name:
+                return sink
+
+    def mute(self, ad: bool = False):
+        self.pulse.mute(self.pulse_sink, mute=True)
+        self.pre_mute_volume = self.volume
+        self.volume = 0.0
+        self.is_muted = True
+        self.is_muted_for_ad = ad
+
+    def unmute(self, ad: bool = False):
+        self.pulse.mute(self.pulse_sink, mute=False)
+        self.volume = self.pre_mute_volume
+        self.pre_mute_volume = None
+        self.is_muted = False
+        self.is_muted_for_ad = False
+
+    def toggle_mute(self):
+        if self.is_muted:
+            self.unmute()
+        else:
+            self.mute()
+
+    @property
+    def playback_status(self):
+        return self.get_property(self.PLAYER_IFACE, 'PlaybackStatus')
+
+    @property
+    def url(self):
+        return self.metadata.get('url')
+
+    @property
+    def is_track_ad(self):
+
+        if re.match(r'^spotify:ad:.*$', self.metadata.get('trackid', '')):
+            return True
+
+        if self.metadata.get('title') == 'Advertisement':
+            return True
+
+        return False
+
+    @property
+    def track_changed(self):
+        return self.url != self.last_url
+
+    @property
+    def playback_started(self):
+        return self.playback_status == 'Playing' and self.last_status != 'Playing'
+
+    def notify_track(self, *args):
+        if self.playback_status in ('Playing', 'Paused'):
+            track = get_track(
+                database=self.database,
+                spotify=self.spotify,
+                prefs=self.prefs,
+                source=self.active_player,
+                data=self.metadata
+            )
+            self.notifier.show(track)
+
+    def monitor_changes(self, on_change: bool = True, on_play: bool = True):
+
+        def signal_handler(signal_number: int, frame):
+            if signal_number == 2:
+                sys.stdout.write('\b\b\r')
+            self.loop.quit()
+
+        def bus_name_handler(*args, **kwargs):
+            if self.requested_bus_name in args and not self.is_connected:
+                print("Player {} was disconnected.".format(self.identity))
+                self.loop.quit()
+
+        def properties_handler(*args, **kwargs):
+
+            if args[0] == 'org.mpris.MediaPlayer2.Player' and self.playback_status == 'Playing':
+
+                if self.prefs.player.MUTE_ADS:
+                    mute_if_ad()
+
+                if not self.is_muted_for_ad and ((on_change and self.track_changed) or (on_play and self.playback_started)):
+                    self.notify_track()
+
+            self.last_status = self.playback_status
+            self.last_url = self.url
+
+        def mute_if_ad():
+
+            if self.is_track_ad and not self.is_muted_for_ad:
+                print("Mute: Advertisment Started")
+                self.mute(ad=True)
+            elif self.is_muted_for_ad:
+                print("Unmute: Advertisment Finished")
+                self.unmute(ad=True)
+
+        # Exit cleanly on SIGINT or SIGTERM
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+
+        # Send notification on SIGUSR1
+        signal.signal(signal.SIGUSR1, self.notify_track)
+
+        self.loop = GLib.MainLoop()
+
+        # Add Signal Receivers
+        self.bus.add_signal_receiver(properties_handler, signal_name='PropertiesChanged', dbus_interface=self.PROPERTIES_IFACE, path=self.OBJECT_PATH)
+        self.bus.add_signal_receiver(bus_name_handler, signal_name='NameOwnerChanged', dbus_interface=self.BUS_DAEMON_IFACE, path=self.BUS_DAEMON_PATH)
+
+        self.loop.run()
+
+
+def get_arguments() -> argparse.Namespace:
+
+    class CapitalisedHelpFormatter(argparse.HelpFormatter):
+        def add_usage(self, usage, actions, groups, prefix=None):
+            if prefix is None:
+                prefix = 'Usage: '
+            return super(CapitalisedHelpFormatter, self).add_usage(usage, actions, groups, prefix)
+
+    def formatter(prog):
+        return CapitalisedHelpFormatter(prog, max_help_position=26)
+
+    parser = argparse.ArgumentParser(
+        prog=APP_NAME, description="Receive track notifications for a music player or file.",
+        usage='%(prog)s [options]', prefix_chars='-', formatter_class=formatter, add_help=False, allow_abbrev=True)
+
+    group_player = parser.add_argument_group('Player')
+    group_player.add_argument('-p', '--player', dest='requested_player', metavar='NAME', type=str, help='Specify a player to monitor.')
+    group_player.add_argument('-l', '--list', dest='list_players', action='store_true', default=False, help='List available players.')
+
+    group_file = parser.add_argument_group('Music File')
+    group_file.add_argument('-f', '--file', dest='path', type=str, metavar='PATH', help='Send notification for file at path.')
+
+    group_database = parser.add_argument_group('Database')
+    group_database.add_argument('--db', dest='dir_to_database', type=str, metavar='PATH', help='Save directory tracks to database.')
+    group_database.add_argument('-c', '--clear', dest='clear_database', action='store_true', default=False, help='Clear track database.')
+
+    group_daemon = parser.add_argument_group('Daemon')
+    group_daemon.add_argument('-d', '--daemonize', dest='start_daemon', action='store_true', default=False, help='Start daemon after startup.')
+    group_daemon.add_argument('-r', '--restart', dest='restart_daemon', action='store_true', default=False, help='Restart running daemon.')
+    group_daemon.add_argument('-k', '--kill', dest='kill_daemon', action='store_true', default=False, help='Kill running daemon.')
+    group_daemon.add_argument('-i', '--id', dest='process_id', action='store_true', default=False, help='Get process ID for running daemon.')
+    group_daemon.add_argument('-s', '--signal', dest='signal_daemon', action='store_true', default=False, help='Signal daemon to send notification.')
+
+    group_optional = parser.add_argument_group('Optional')
+    group_optional.add_argument('-h', '--help', action='help', default=False, help='Show help message and exit.')
+    group_optional.add_argument('-n', '--now', dest='notify_now', action='store_true', default=False, help='Send a single notification and exit.')
+    group_optional.add_argument('-q', '--quiet', action='store_true', default=False, help='Suppress non-error messages.')
+
+    return parser.parse_args()
+
+
+def get_preferences() -> Preferences:
+
+    NOTIFIER_URGENCY = {'low': 0, 'normal': 1, 'critical': 2}
+
+    def get_section(section_name: str, section_data: dict) -> dict:
+
+        section_dict = dict()
+        for key, value in PREFERENCES[section_name].items():
+
+            data_type = PREFERENCES[section_name][key]['type']
+            default_value = PREFERENCES[section_name][key]['default']
+
+            if not config.has_option(section_name, key):
+                section_dict[key.upper()] = default_value
+            else:
+
+                option_value = config.get(section_name, key)
+
+                if data_type == str:
+                    option_value = str(option_value)
+                elif data_type == int and option_value.isnumeric():
+                    option_value = int(option_value)
+                elif data_type == list:
+                    option_value = option_value.replace(' ', '').split(',')
+                elif data_type == bool:
+                    if option_value.lower() in ('yes', 'true'):
+                        option_value = True
+                    elif option_value.lower() in ('no', 'false'):
+                        option_value = False
+
+                if option_value == '':
+                    option_value = None
+                elif section_name == 'notifier' and key == 'urgency' and option_value in NOTIFIER_URGENCY:
+                    option_value = NOTIFIER_URGENCY[option_value]
+
+                section_dict[key.upper()] = option_value if option_value and option_value else default_value
+
+        return section_dict
+
+    def validate_data(prefs: dict) -> None:
+
+        if not os.path.isdir(os.path.dirname(prefs['database']['PATH'])):
+            sys.exit(f"Database directory {prefs['database']['PATH']} not found.")
+
+        if isinstance(prefs['notifier'].get('DEFAULT_COVER'), str) and not os.path.isfile(prefs['notifier'].get('DEFAULT_COVER')):
+            sys.exit(f"Notifier default image not found. {prefs['notifier']['DEFAULT_COVER']}")
+
+    if not os.path.isfile(APP_CONFIG_PATH):
+        return None
+
+    config = configparser.ConfigParser()
+    config.read(APP_CONFIG_PATH)
+
+    # Gather preferences into a dictionary
+    prefs = dict()
+    for section, section_data in PREFERENCES.items():
+        if config.has_section(section):
+            prefs[section] = get_section(section, section_data)
+
+    # Validate critical data in preferences
+    validate_data(prefs)
+
+    player = namedtuple('player', prefs['player'].keys())(**prefs['player'])
+    acoustid = namedtuple('acoustid', prefs['acoustid'].keys())(**prefs['acoustid'])
+    database = namedtuple('database', prefs['database'].keys())(**prefs['database'])
+    notifier = namedtuple('notifier', prefs['notifier'].keys())(**prefs['notifier'])
+    spotify = namedtuple('spotify', prefs['spotify'].keys())(**prefs['spotify'])
+
+    # Return preferences as a namedtuple
+    return Preferences(player, acoustid, database, notifier, spotify)
+
+
+def process_exists(pid: int) -> bool:
+
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    else:
+        return True
+
+
+def get_players(ignore_instances: Optional[bool] = False) -> list:
+
+    bus = dbus.SessionBus()
+
+    if ignore_instances:
+        bus_pattern = r'^org\.mpris\.MediaPlayer2\.(?!playerctld|[a-zA-Z0-9]*\.instance[0-9]+).*$'
+    else:
+        bus_pattern = r'^org\.mpris\.MediaPlayer2\.(?!playerctld).*$'
+
+    data = [str(bus).replace('org.mpris.MediaPlayer2.', '') for bus in bus.list_names() if re.match(bus_pattern, str(bus))]
+
+    bus.close()
+
+    return data
+
+
+def choose_player(requested: str, preferred: list, ignore_instances: Optional[bool] = False) -> Optional[str]:
+
+    players = get_players(ignore_instances)
+
+    if requested:
+        if requested in players:
+            return requested
+        else:
+            return None
+
+    # if list has one or more item then find best player
+    if len(players) > 0:
+
+        # find and return first preferred player available
+        for player in preferred:
+            if player in players:
+                return player
+
+        # find and return first non-browser instance player available
+        for player in players:
+            if not re.match(r'^\S*\.instance\d*$', player):
+                return player
+
+        # return first player of any kind in list
+        return players[0]
+
+
+def get_identity(player: str):
+
+    value = None
+
+    bus = dbus.SessionBus()
+
+    try:
+        proxy = bus.get_object('org.mpris.MediaPlayer2.{}'.format(player), '/org/mpris/MediaPlayer2')
+        value = str(proxy.Get('org.mpris.MediaPlayer2', 'Identity', dbus_interface=dbus.PROPERTIES_IFACE))
+    except dbus.exceptions.DBusException:
+        if player in PLAYER_NAMES:
+            value = 'XXX' + PLAYER_NAMES[player]
+        else:
+            value = 'YYY' + player.title()
+
+    bus.close()
+
+    if value:
+        return value
+
+
+def print_players(preferred: list, ignore_instances: Optional[bool] = False) -> str:
+
+    default_player = choose_player(requested=None, preferred=preferred, ignore_instances=ignore_instances)
+
+    players = get_players(ignore_instances=ignore_instances)
+
+    if len(players) > 0:
+
+        list_string = ''
+        for player in sorted(players):
+
+            if list_string != '':
+                list_string += '\n'
+
+            list_string += player
+
+            if player == default_player:
+                list_string += ' (default)'
+
+        print(list_string)
+
+    else:
+        print("No players found.")
+
+
+def get_bytes_from_url(url: str):
+
+    try:
+        response = requests.get(url, timeout=5)
+    except requests.exceptions.ConnectionError:
+        return None
+
+    if response.status_code == 200:
+        return response.content
+
+
+def get_bytes_from_path(path: str):
+
+    if os.path.isfile(path):
+        try:
+            with open(path, 'rb') as file:
+                return file.read()
+        except Exception:
+            return None
+
+
+def get_track(database: Database, spotify: SpotifyAPI, prefs: Preferences, source: str, data: Optional[dict] = None, url: Optional[str] = None):
+
+    if not url and 'url' not in data:
+        print("Track has no url")
+        return None
+
+    if url:
+        print("--- TRACK: \"{}\"".format(os.path.basename(url)))
+        track = Track(source=source, url=url)
+    else:
+        print("--- TRACK: \"{}\"".format(os.path.basename(data['url'])))
+        track = Track(source=source, data=data)
+
+    if track.is_complete:
+        print("Track data is complete")
+        return track
+
+    if track.is_local:
+
+        audiofile = AudioFile(path=track.path)
+
+        if not track.tags.has_required:
+            print("GET: Tag")
+            tag_data = audiofile.get_metadata()
+            if tag_data:
+                print("USE: Tag")
+                track.tags.set(tag_data, 'tags')
+
+        if not track.cover:
+            print("GET: Cover")
+            cover = audiofile.get_cover()
+            if cover:
+                print("USE: Cover ({})".format(cover.source))
+                track.cover = cover
+
+    if not track.is_complete:
+        print("GET: Database")
+        db_track = database.get_track(track.url)
+        if db_track:
+            print("USE: Database")
+            print("Track data is complete")
+            return db_track
+
+    if track.is_local:
+
+        if not track.tags.keys() >= {'title', 'artist', 'album'}:
+            print("GET: Parsed Filename")
+            filename_data = audiofile.parse_filename()
+            if filename_data:
+                print("USE: Parsed Filename")
+                track.tags.append(filename_data, 'filename')
+
+        if not track.tags.keys() >= {'title', 'artist'}:
+            print("GET: Fingerprint")
+            fp_data = audiofile.fingerprint()
+            if fp_data:
+                print("USE: Fingerprint")
+                track.tags.set(fp_data, 'fingerprint')
+
+    if track.tags.keys() >= {'title', 'artist'} and not track.is_complete:
+        print("GET: Spotify API")
+        api_track = spotify.search_track(track.tags['artist'], track.tags['title'], album=track.tags.get('album'), date=track.tags.get('contentCreated'))
+        if api_track:
+            print("USE: Spotify API")
+            track.tags.set(api_track.tags)
+            track.cover = api_track.cover
+
+    if track.is_complete:
+
+        if 'database' not in track.tags.sources and 'fingerprint' in track.tags.sources or 'spotify_api' in track.tags.sources or prefs.database.SAVE_ALL or (track.is_remote and prefs.database.SAVE_REMOTE):
+            print("SAVE: Database")
+            database.save_track(track)
+
+        print("Track data is complete")
+        return track
+
+
+def dir_to_database(base_dir: str, prefs: Preferences):
+
+    database = Database(
+        prefs.database.PATH
+    )
+
+    spotify = SpotifyAPI(
+        client_id=prefs.spotify.CLIENT_ID,
+        client_secret=prefs.spotify.CLIENT_SECRET,
+        market=prefs.spotify.MARKET
+    )
+
+    audio_extensions = ('mp3', 'flac', 'm4a', 'wma', 'ogg', 'wav')
+
+    total_dirs = 0
+    total_files = 0
+
+    directory_list = [d[0] for d in os.walk(base_dir)]
+
+    for dir in directory_list:
+
+        total_dirs += 1
+
+        audio_files = [f for f in os.listdir(dir) if os.path.splitext(f)[-1].lstrip('.') in audio_extensions]
+
+        if len(audio_files) > 0:
+
+            print("\nDirectory: \"{}\"".format(dir))
+
+            for file in audio_files:
+
+                file_path = os.path.join(dir, file)
+
+                get_track(
+                    database=database,
+                    spotify=spotify,
+                    prefs=prefs,
+                    source='file',
+                    data=None,
+                    url=file_path
+                )
+
+                total_files += 1
+
+    database.close()
+
+    print("\nScanned {} files in {} directories.".format(total_files, total_dirs))
+
+
+def notify_file(path: str, prefs: Preferences):
+
+    notifier = Notifier(
+        prefs=prefs,
+        identity=None,
+        desktop_entry=None
+    )
+
+    database = Database(
+        path=prefs.database.PATH
+    )
+
+    spotify = SpotifyAPI(
+        client_id=prefs.spotify.CLIENT_ID,
+        client_secret=prefs.spotify.CLIENT_SECRET,
+        market=prefs.spotify.MARKET
+    )
+
+    track = get_track(
+        database=database,
+        spotify=spotify,
+        prefs=prefs,
+        source='file',
+        data=None,
+        url=path
+    )
+
+    notifier.show(track)
+
+    database.close()
+    notifier.close()
+
+
+def notify_track(player: str, prefs: Preferences):
+    with Player(player, prefs) as mpris:
+        mpris.notify_track()
+
+
+def monitor_player(player: str, prefs: Preferences):
+
+    with Player(player_name=player, prefs=prefs) as mpris:
+        mpris.monitor_changes(
+            on_change=prefs.player.ON_CHANGE,
+            on_play=prefs.player.ON_PLAY
+        )
+
+
+def main():
+
+    pidfile = PIDLockFile(PIDFILE_PATH, timeout=-1)
+
+    args = get_arguments()
+
+    prefs = get_preferences()
+
+    if args.list_players:
+        print_players(prefs)
+        sys.exit(0)
+
+    if pidfile.is_locked() and not pidfile.i_am_locking():
+        if args.process_id:
+            print(pidfile.read_pid())
+            sys.exit(0)
+        elif args.signal_daemon:
+            os.kill(pidfile.read_pid(), signal.SIGUSR1)
+            sys.exit(0)
+        elif args.kill_daemon:
+            os.kill(pidfile.read_pid(), signal.SIGINT)
+            sys.exit(0)
+        elif args.restart_daemon:
+            process_id = pidfile.read_pid()
+            os.kill(process_id, signal.SIGINT)
+            while process_exists(process_id):
+                time.sleep(0.025)
+            pidfile.break_lock()
+        else:
+            sys.exit("ERROR: {} is already running.".format(APP_NAME))
+
+    elif args.restart_daemon:
+        sys.exit("ERROR: Cannot restart. {} is not running.".format(APP_NAME))
+
+    if args.clear_database:
+
+        if not args.quiet:
+            print("Clearing database..")
+
+        with Database(prefs.database.PATH) as database:
+            database.delete_records()
+
+    if args.dir_to_database:
+        if not args.quiet:
+            print("Scanning \"{}\"..".format(args.dir_to_database))
+        dir_to_database(args.dir_to_database, prefs)
+        sys.exit(0)
+
+    if args.path:
+        notify_file(args.path, prefs)
+        sys.exit(0)
+
+    player = choose_player(
+        requested=args.requested_player,
+        preferred=prefs.player.PREFERRED,
+        ignore_instances=prefs.player.IGNORE_INSTANCES
+    )
+
+    if not player:
+        if args.requested_player:
+            sys.exit("ERROR: Player {} not found.".format(get_identity(args.requested_player)))
+        else:
+            sys.exit("ERROR: Player not found.")
+
+    if args.notify_now:
+        notify_track(player, prefs)
+
+    elif args.start_daemon or args.restart_daemon:
+
+        if not args.quiet:
+            if args.start_daemon:
+                print("Daemonizing..")
+            elif args.restart_daemon:
+                print("Restarting..")
+
+        with daemon.DaemonContext(pidfile=pidfile, umask=0o002, uid=os.getuid(), gid=os.getgid(), working_directory=os.getcwd(), stdout=sys.stdout, stdin=sys.stdin, stderr=sys.stderr):
+            monitor_player(player, prefs)
+
+    else:
+
+        if not args.quiet:
+            print("Monitoring {}..".format(get_identity(player)))
+
+        with PIDLockFile(PIDFILE_PATH, timeout=-1):
+            monitor_player(player, prefs)
+
+
+if __name__ == "__main__":
+    main()
