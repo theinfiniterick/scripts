@@ -29,7 +29,7 @@ show_help() {
 
     echo "Usage: screenshot [OPTIONS] [PATH]"
     echo
-    echo "Selection:"
+    echo "Content:"
     echo "  -f, --fullscreen     Select full screen (default)"
     echo "  -w, --window         Select focused window"
     echo "  -s, --selection      Select a window or rectangle"
