@@ -1,6 +1,8 @@
 #!/bin/bash
 
-# Dependencies: imagemagick, xclip
+# Dependencies:
+# - imagemagick
+# - xclip
 
 # Default image format
 DEFAULT_FORMAT="png"
