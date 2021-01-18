@@ -29,10 +29,10 @@ show_help() {
 
     echo "Usage: screenshot [OPTIONS] [PATH]"
     echo
-    echo "Content:"
-    echo "  -f, --fullscreen     Grab full screen (default)"
-    echo "  -w, --window         Grab active window"
-    echo "  -s, --selection      Grab a selection"
+    echo "Selection:"
+    echo "  -f, --fullscreen     Select full screen (default)"
+    echo "  -w, --window         Select focused window"
+    echo "  -s, --selection      Select a window or rectangle"
     echo
     echo "Options:"
     echo "  -c, --clipboard      Send screenshot to clipboard"
