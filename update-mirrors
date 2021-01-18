@@ -1,0 +1,38 @@
+#!/bin/bash
+
+MIRROR_COUNT=12
+
+if [ ! $UID == "0" ]; then
+	echo "Error: Must run as root."
+	exit 1
+fi
+
+programs=(reflector curl wget)
+
+for program in $programs; do
+	if [ -n "$(sudo whereis $program | grep -v "^$program:$")" ]; then
+		download_program=$program
+		break
+	fi
+done
+
+if [ -z $download_program ]; then
+	echo "Error: Must install reflector, curl or wget."
+	exit 1
+fi
+
+echo "Ranking mirrors.."
+
+if [ $download_program == "reflector" ]; then
+
+	reflector --country CA,US --protocol http,https --age 48 --number 50 --sort score --ipv4 | sed -e '/^#/d' -e '/^$/d' | rankmirrors -n $MIRROR_COUNT - > /etc/pacman.d/mirrorlist
+
+elif [ $download_program == "curl" ]; then
+
+	curl --silent 'https://www.archlinux.org/mirrorlist/?country=CA&country=US&protocol=http&protocol=https&ip_version=4' | sed -e 's/^#Server/Server/' -e '/^#/d' -e '/^$/d' | rankmirrors -n $MIRROR_COUNT - > /etc/pacman.d/mirrorlist
+
+elif [ $download_program == "wget" ]; then
+
+	wget --quiet -O - 'https://www.archlinux.org/mirrorlist/?country=CA&country=US&protocol=http&protocol=https&ip_version=4' | sed -e 's/^#Server/Server/' -e '/^#/d' -e '/^$/d' | rankmirrors -n $MIRROR_COUNT - > /etc/pacman.d/mirrorlist
+
+fi

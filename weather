@@ -1,0 +1,106 @@
+#!/usr/bin/env python
+
+import sys
+import requests
+
+LOCATION = "Hampden"
+
+
+def get_data(loc):
+
+	url = "https://wttr.in/{}".format(loc)
+	headers = {'user-agent': 'Dataquest'}
+	params = {'format': 'j1'}
+
+	try:
+		response = requests.get(url, headers=headers, params=params)
+		results = response.json()
+	except requests.exceptions.ConnectionError:
+		sys.exit("Error getting weather data.")
+
+	return results
+
+
+def main(loc, args=None):
+
+	results = get_data(loc)
+
+	string = None
+
+	if args is None:
+
+		string = f"{results['current_condition'][0]['temp_F']}°F {results['current_condition'][0]['weatherDesc'][0]['value']}"
+
+		print(string)
+
+	else:
+
+		for arg in args:
+
+			string = None
+
+			if arg in args:
+
+				if arg == 'cloudcover':
+					string = f"{results['current_condition'][0]['cloudcover']}%"
+				elif arg == 'desc':
+					string = results['current_condition'][0]['weatherDesc'][0]['value']
+				elif arg == 'dewpoint':
+					string = f"{results['weather'][0]['hourly'][0]['DewPointF']}°F"
+				elif arg == 'feelslike':
+					string = f"{results['current_condition'][0]['FeelsLikeF']}°F"
+				elif arg == 'heatindex':
+					string = f"{results['weather'][0]['hourly'][0]['HeatIndexF']}°F"
+				elif arg == 'high':
+					string = f"{results['weather'][0]['maxtempF']}°F"
+				elif arg == 'humidity':
+					string = f"{results['current_condition'][0]['humidity']}%"
+				elif arg == 'low':
+					string = f"{results['weather'][0]['mintempF']}°F"
+				elif arg == 'moonphase':
+					string = results['weather'][0]['astronomy'][0]['moon_phase']
+				elif arg == 'moonrise':
+					string = results['weather'][0]['astronomy'][0]['moonrise']
+				elif arg == 'moonset':
+					string = results['weather'][0]['astronomy'][0]['moonset']
+				elif arg == 'observetime':
+					string = results['current_condition'][0]['localObsDateTime']
+				elif arg == 'precip':
+					value = str(round(float(results['current_condition'][0]['precipMM']) * 0.03937007874, 5))
+					string = f"{value} in."
+				elif arg == 'pressure':
+					string = results['current_condition'][0]['pressure']
+				elif arg == 'sunhours':
+					string = results['weather'][0]['sunHour']
+				elif arg == 'sunrise':
+					string = results['weather'][0]['astronomy'][0]['sunrise']
+				elif arg == 'sunset':
+					string = results['weather'][0]['astronomy'][0]['sunset']
+				elif arg == 'temp':
+					string = f"{results['current_condition'][0]['temp_F']}°F"
+				elif arg == 'totalsnow':
+					string = f"{results['weather'][0]['totalSnow_cm']}cm."
+				elif arg == 'uvindex':
+					string = results['current_condition'][0]['uvIndex']
+				elif arg == 'visibility':
+					string = results['current_condition'][0]['visibility']
+				elif arg == 'windchill':
+					string = f"{results['weather'][0]['hourly'][0]['WindChillF']}°F"
+				elif arg == 'winddir':
+					string = results['current_condition'][0]['winddir16Point']
+				elif arg == 'winddirdegree':
+					string = f"{results['current_condition'][0]['winddirDegree']}°"
+				elif arg == 'windgust':
+					string = f"{results['weather'][0]['hourly'][0]['WindGustMiles']}mph"
+				elif arg == 'windspeed':
+					string = f"{results['current_condition'][0]['windspeedMiles']}mph"
+
+			if string is not None:
+				print(string)
+
+
+if __name__ == "__main__":
+	if len(sys.argv) == 1:
+		main(LOCATION)
+	else:
+		main(LOCATION, sys.argv[1:])

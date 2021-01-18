@@ -1,0 +1,244 @@
+#!/usr/bin/python
+
+import argparse
+import colorama
+import os
+import re
+import requests
+import sys
+
+IGNORE_DOMAINS = [
+    'localhost',
+    'local',
+    'localhost.localdomain',
+    'broadcasthost',
+    'ip6-localhost',
+    'ip6-loopback',
+    'ip6-localnet',
+    'ip6-mcastprefix',
+    'ip6-allnodes',
+    'ip6-allrouters',
+    'ip6-allhosts'
+]
+
+SOURCES = {
+    "AdAway": "https://adaway.org/hosts.txt",
+    "Dan Pollock": "https://someonewhocares.org/hosts/hosts",
+    "EasyPrivacy": "https://v.firebog.net/hosts/Easyprivacy.txt",
+    "MVPS Hosts": "https://winhelp2002.mvps.org/hosts.txt",
+    "Peter Lowe": "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts;showintro=0",
+    "Spam404": "https://raw.githubusercontent.com/Spam404/lists/master/main-blacklist.txt",
+    "Steven Black": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+    "URLhaus": "https://gitlab.com/curben/urlhaus-filter/-/raw/master/urlhaus-filter-hosts.txt"
+}
+
+
+def get_arguments():
+
+    class CapitalisedHelpFormatter(argparse.HelpFormatter):
+        def add_usage(self, usage, actions, groups, prefix=None):
+            if prefix is None:
+                prefix = 'Usage: '
+            return super(CapitalisedHelpFormatter, self).add_usage(usage, actions, groups, prefix)
+
+    def formatter(prog):
+        return CapitalisedHelpFormatter(prog, max_help_position=30)
+
+    parser = argparse.ArgumentParser(
+        prog='update-hosts', description="Update hosts file.",
+        usage='%(prog)s [options]', prefix_chars='-', formatter_class=formatter, add_help=False, allow_abbrev=True)
+
+    group_lists = parser.add_argument_group('Block Lists')
+    group_lists.add_argument('-f', '--file', metavar='PATH', type=str, help='Specify a file containing block list urls.')
+    group_lists.add_argument('-u', '--url', metavar='URL', type=str, help='Specify a block list url.')
+    group_lists.add_argument('-a', '--all', action='store_true', default=False, help='Suppress non-error messages.')
+
+    group_optional = parser.add_argument_group('Optional')
+    group_optional.add_argument('-h', '--help', action='help', default=False, help='Show help message and exit.')
+    # group_optional.add_argument('-q', '--quiet', action='store_true', default=False, help='Suppress non-error messages.')
+
+    return parser.parse_args()
+
+
+def get_label(url: str):
+    for key, value in SOURCES.items():
+        if url == value:
+            return key
+
+
+def extract_domains(data: str):
+
+    url_pattern = r'^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,5}(:[0-9]{1,5})?(\/.*)?$'
+    line_pattern = r'^(0.0.0.0|127.0.0.1)(\s*|\t*)\S*.*$'
+
+    domains = set()
+    for line in data.split('\n'):
+        line = line.strip('\r')
+
+        if re.match(line_pattern, line):
+            values = line.split()
+
+            if len(values) >= 2:
+                domain = values[1]
+
+                if domain not in IGNORE_DOMAINS:
+                    domains.add(domain)
+
+        elif re.match(url_pattern, line):
+
+            if line not in IGNORE_DOMAINS:
+                domains.add(line)
+
+    return domains
+
+
+def get_domains(urls: list):
+
+    domains = set()
+
+    sys.stdout.write("Updating hosts.. ")
+    sys.stdout.flush()
+
+    first = True
+
+    for url in urls:
+
+        label = get_label(url)
+
+        if not first:
+            sys.stdout.write(", ")
+        if label:
+            sys.stdout.write("{}{}{}".format(colorama.Style.BRIGHT, label, colorama.Style.NORMAL))
+        else:
+            sys.stdout.write("{}{}{}".format(colorama.Style.BRIGHT, url, colorama.Style.NORMAL))
+
+        sys.stdout.flush()
+
+        try:
+            response = requests.get(url)
+        except requests.exceptions.ConnectionError:
+            sys.exit("Connection to {}{}{} failed.".format(colorama.Style.BRIGHT, url, colorama.Style.NORMAL))
+
+        if response.status_code == 200:
+            source_domains = extract_domains(response.text)
+            if source_domains:
+                domains.update(source_domains)
+        else:
+            print("{}Failed{} to download list from {}{}{}.".format(
+                colorama.Fore.RED,
+                colorama.Fore.RESET,
+                colorama.Style.BRIGHT,
+                url,
+                colorama.Style.NORMAL
+            ))
+
+        first = False
+
+    return sorted(domains)
+
+
+def get_head_lines():
+
+    with open('/etc/hosts', 'r') as file:
+        head_content = file.read()
+
+    lines = []
+    for line in head_content.splitlines():
+
+        if line == '# Begin Block Domains':
+            return lines
+
+        if re.search(r'^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}', line):
+            lines.append(line)
+        elif re.search(r'(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))', line):
+            lines.append(line)
+
+    return lines
+
+
+def write_hosts_file(sources: list):
+
+    head_lines = get_head_lines()
+    domains = get_domains(sources)
+
+    file = open('/etc/hosts', 'w')
+
+    if len(head_lines) > 0:
+        file.write('# Begin Normal Domains\n\n')
+
+        for line in head_lines:
+            file.write('{}\n'.format(line))
+
+    if len(domains) > 0:
+        file.write('\n# Begin Block Domains\n\n')
+
+        for domain in domains:
+            file.write('{}    {}\n'.format('0.0.0.0', domain))
+
+    file.close()
+
+    print("\n\n{}{}{} regular domains and {}{}{} blocked domains written to hosts file.".format(
+        colorama.Style.BRIGHT,
+        len(head_lines),
+        colorama.Style.NORMAL,
+        colorama.Style.BRIGHT,
+        len(domains),
+        colorama.Style.NORMAL
+    ))
+
+
+def choose_sources():
+
+    max_length = 0
+    for key in SOURCES.keys():
+        if len(key) > max_length:
+            max_length = len(key)
+
+    print("Choose Block Lists:")
+
+    data = []
+    if len(SOURCES) > 0:
+        for key, value in SOURCES.items():
+            choice = input('{:{width}} [y/N] '.format(key.rjust(max_length), width=max_length))
+            if choice.lower() in ('y', 'yes'):
+                data.append(value)
+
+    return data
+
+
+def get_file_sources(path: str):
+
+    with open(path, 'r') as file:
+        data = file.read()
+
+    sources = []
+    for line in data.splitlines():
+        sources.append(line.strip())
+
+    return sources
+
+
+def main():
+
+    args = get_arguments()
+
+    if not os.getuid() == 0:
+        sys.exit("Must run as root.")
+
+    if args.all:
+        sources = [url for url in SOURCES.values()]
+    elif args.url:
+        sources = [args.url]
+    elif args.file:
+        if not os.path.isfile(args.file):
+            sys.exit("Source file \"{}\" not found.".format(args.file))
+        else:
+            sources = get_file_sources(args.file)
+    else:
+        sources = choose_sources()
+
+    write_hosts_file(sources)
+
+
+if __name__ == "__main__":
+    main()

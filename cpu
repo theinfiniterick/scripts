@@ -1,0 +1,30 @@
+#!/bin/bash
+
+TEXT_COLOR_VALUE=$(tput setaf 3)
+TEXT_COLOR_RESET=$(tput sgr0)
+
+var_round_to_integer() {
+	printf "%.0f\n" "$1"
+}
+
+get_cpu() {
+	value=$(top -b -n1 | grep "Cpu(s)" | awk '{print $2 + $4}')
+	echo "$value"
+}
+
+echo_cpu() {
+	echo "CPU: ${TEXT_COLOR_VALUE}$(get_cpu)%${TEXT_COLOR_RESET}"
+}
+
+notify_cpu() {
+	value=$(get_cpu)
+	notification "cpu" "cpu" "low" "default" "cpu" "CPU: $value%\n__$(var_round_to_integer $value)__"
+}
+
+case $1 in
+	"") echo_cpu ;;
+esac
+
+if [[ "$@" =~ "--notify" ]] || [[ "$@" =~ "-n" ]]; then
+	notify_cpu
+fi

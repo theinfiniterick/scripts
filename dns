@@ -1,0 +1,53 @@
+#!/bin/bash
+
+TEXT_COLOR_VALUE=$(tput setaf 3)
+TEXT_COLOR_RESET=$(tput sgr0)
+
+list_dns() {
+
+	for ip in $(sed -n "s/^nameserver\s*//p" /etc/resolv.conf); do
+		echo "DNS: ${TEXT_COLOR_VALUE}${ip}${TEXT_COLOR_RESET}"
+	done
+
+}
+
+set_dns() {
+
+	if [ $(id -ru) != 0 ]; then
+	 	echo "error: you cannot perform this operation unless you are root."
+	 	exit 1
+	fi
+
+	if [ ${#@} -eq 0 ]; then
+		echo "error: no dns specified."
+		exit 1
+	fi
+
+	for ip in "$@"; do
+        if [[ ! $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+			if [ $error_message ]; then
+				error_message+="\n"
+			fi
+            error_message+="Invalid IP Address: $ip"
+        fi
+    done
+
+    if [[ $error_message ]]; then
+        echo -e "$error_message"
+        exit 1
+	fi
+
+	echo -n "" | tee /etc/resolv.conf > /dev/null
+
+	for ip in "$@"; do
+		echo "nameserver $ip" | tee -a /etc/resolv.conf > /dev/null
+	done
+
+	list_dns
+
+}
+
+case $1 in
+	"-l"|"--list"|"") list_dns ;;
+	"-s"|"--set") set_dns ${@:2} ;;
+esac
