@@ -1,0 +1,132 @@
+#!/usr/bin/python
+
+import socket
+import requests
+import colorama
+import os
+import subprocess
+import getmac
+import sys
+
+
+PUBLIC_IP_URL = "http://ifconfig.me"
+INTERFACE = 'wlp1s0'
+
+
+def get_hostname():
+
+    with open('/etc/hostname') as file:
+        return file.read().strip()
+
+
+def get_interfaces():
+    return [iface for iface in os.listdir('/sys/class/net/') if iface != 'lo']
+
+
+def get_dns_entries():
+    with open('/etc/resolv.conf') as file:
+        return [line.split()[1] for line in file.read().splitlines() if line.startswith('nameserver')]
+
+
+def get_ssid():
+
+    try:
+        output = subprocess.check_output(['iwgetid'])
+        if output:
+            string = output.decode('utf-8').strip()
+            values = string.split()
+            interface = values[0]
+            ssid = values[1].split('ESSID:')[1].strip('"')
+            return interface, ssid
+    except Exception:
+        return None
+
+
+def get_local_ip():
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    try:
+        s.connect(('10.255.255.255', 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return '127.0.0.1'
+
+
+def get_public_ip():
+
+    try:
+        response = requests.get(PUBLIC_IP_URL, timeout=3)
+        return response.text
+    except requests.exceptions.ConnectionError:
+        return None
+    except requests.exceptions.InvalidSchema:
+        return None
+
+
+def randomize_mac():
+
+    if not os.getuid() == 0:
+        sys.exit("Requires root priviledges.")
+
+    subprocess.Popen(['ifconfig', INTERFACE, 'down']).wait()
+    subprocess.Popen(['macchanger', '-a', INTERFACE]).wait()
+    subprocess.Popen(['ifconfig', INTERFACE, 'up']).wait()
+
+
+def print_field(field, value, value2=None):
+
+    if field == 'hostname':
+        label = "   Hostname"
+        color = colorama.Fore.CYAN
+    elif field == 'ssid':
+        label = "       SSID"
+        color = colorama.Fore.YELLOW
+    elif field == 'status':
+        label = "     Status"
+        color = colorama.Fore.GREEN if value == 'Connected' else colorama.Fore.RED
+    elif field == 'localip':
+        label = "   Local IP"
+        color = colorama.Fore.YELLOW
+    elif field == 'publicip':
+        label = "  Public IP"
+        color = colorama.Fore.YELLOW
+    elif field == 'dns':
+        label = " DNS Server" if len(value) == 1 else "DNS Servers"
+        color = colorama.Fore.CYAN
+        value = ', '.join(value)
+    elif field == 'interface':
+        label = "  Interface"
+        color = colorama.Fore.CYAN
+
+    if field == 'interface':
+        print("{}: {}{}{} ({}{}{})".format(label, color, value, colorama.Fore.RESET, color, value2, colorama.Fore.RESET))
+    else:
+        print("{}: {}{}{}".format(label, color, value, colorama.Fore.RESET))
+
+
+def main():
+
+    iface_result = get_ssid()
+
+    if iface_result:
+        interface, ssid = iface_result
+
+    mac_address = getmac.get_mac_address(interface=interface)
+
+    print_field('hostname', get_hostname())
+    print_field('interface', interface, mac_address)
+    print_field('dns', get_dns_entries())
+
+    public_ip = get_public_ip()
+
+    print_field('status', 'Connected' if public_ip else 'Disconnected')
+    print_field('ssid', ssid)
+    print_field('localip', get_local_ip())
+    print_field('publicip', public_ip)
+
+
+if __name__ == "__main__":
+    main()
