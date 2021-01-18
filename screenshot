@@ -8,10 +8,12 @@
 DEFAULT_FORMAT="png"
 
 # Default sub-directory of images folder
-DEFAULT_DIRECTORY="shot"
+DIRECTORY_NAME="shot"
 
 # Size of image view in percentage of screen
 VIEW_SIZE=60
+
+# Image formats
 FORMATS=(png jpg gif bmp tif)
 
 # Default command line argument values
@@ -40,7 +42,7 @@ show_help() {
 
 }
 
-image_directory() {
+base_directory() {
 
     if [ -n "$XDG_CONFIG_HOME" ]; then
         config_dir=$XDG_CONFIG_HOME
@@ -48,13 +50,36 @@ image_directory() {
         config_dir="$HOME/.config"
     fi
 
-    filename="$config_dir/user-dirs.dirs"
+    user_dirs_path="$config_dir/user-dirs.dirs"
 
-    if [ -f "$filename" ]; then
-        echo "$(eval echo $(cat $filename | grep XDG_PICTURES_DIR | cut -d '=' -f2 | tr -d \"))"
-    else
-        echo "$HOME/Images"
+    if [ -f "$user_dirs_path" ]; then
+
+        dir="$(eval echo $(cat $user_dirs_path | grep XDG_PICTURES_DIR | cut -d '=' -f2 | tr -d \"))"
+
+        if [ -d "$dir" ]; then
+            base_dir=$dir
+        fi
+
     fi
+
+    if [ -z "$base_dir" ]; then
+
+        dirs=(Pictures pictures Images images)
+
+        for dir in ${dirs[@]}; do
+            if [ -d "$HOME/$dir" ]; then
+                base_dir="$HOME/$dir"
+                break
+            fi
+        done
+
+    fi
+
+    if [ -z "$base_dir" ]; then
+        base_dir=$HOME
+    fi
+
+    echo $base_dir
 
 }
 
@@ -108,12 +133,12 @@ if [ -z "$path" ]; then
     else
 
         filename="$(date "+%Y-%m-%d_%H:%M:%S").$DEFAULT_FORMAT"
-        path="$(image_directory)/$DEFAULT_DIRECTORY/$filename"
+        path="$(base_directory)/$DIRECTORY_NAME/$filename"
 
         # If path already exists then add milliseconds to filename
         if [ -f "$path" ]; then
             filename="$(date "+%Y-%m-%d_%H:%M:%S.%N").$DEFAULT_FORMAT"
-            path="$(image_directory)/$DEFAULT_DIRECTORY/$filename"
+            path="$(base_directory)/$DIRECTORY_NAME/$filename"
         fi
 
     fi
