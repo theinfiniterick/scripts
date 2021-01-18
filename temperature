@@ -1,0 +1,20 @@
+#!/bin/bash
+
+TEXT_COLOR_VALUE=$(tput setaf 3)
+TEXT_COLOR_RESET=$(tput sgr0)
+
+echo_temp() {
+	echo "Temperature: ${TEXT_COLOR_VALUE}$(sensors | grep -m 1 '°C' | awk '{print $2}' | tr -d '+')${TEXT_COLOR_RESET}"
+}
+
+notify_temp() {
+	notification "temperature" "temperature" "low" "default" "temperature" "Temperature: __VALUE__$(get_temp)__END__"
+}
+
+case $1 in
+	"") echo_temp ;;
+esac
+
+if [[ "$@" =~ "--notify" ]] || [[ "$@" =~ "-n" ]]; then
+	notify_temp
+fi

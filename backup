@@ -1,0 +1,175 @@
+#!/usr/bin/python
+
+import sys
+import os.path
+import subprocess
+
+
+MOUNT_DIRECTORY = '/media'
+
+DIRECTORIES = [
+    '.local',
+    'bin',
+    'data',
+    'documents',
+    'downloads',
+    'images',
+    'mega',
+    'music',
+    'projects',
+    'scripts',
+    'videos'
+]
+
+SOURCES = DIRECTORIES + [
+    'config',
+    'dirs',
+    'all'
+]
+
+DESTINATIONS = [
+    'p1',
+    'p2'
+]
+
+CONFIG_DIRS = [
+    'alacritty', 'audacious', 'autostart',
+    'bash', 'beets', 'blockify',
+    'cantata', 'cava', 'celluloid', 'cert', 'Clementine', 'cmus',
+    'dconf', 'deadd', 'dia', 'discord', 'dunst',
+    'easytag',
+    'fish', 'fontconfig', 'furiousisomount', 'fzf',
+    'GIMP', 'gnome', 'gnupg', 'gthumb', 'gtk-2.0', 'gtk-3.0',
+    'Headset', 'htop',
+    'inkscape',
+    'JetBrains',
+    'keepassxc', 'kodi',
+    'libreoffice',
+    'mc', 'menus', 'mozilla', 'mpDris2', 'mpd', 'mpv', 'MusicBrainz',
+    'nano', 'ncmpcpp', 'nemo', 'neofetch', 'nowplaying', 'nvim',
+    'obsidian',
+    'pamac', 'pcmanfm', 'pistol', 'pragha', 'projectM', 'pulse', 'pvpn-cli1', 'pvpn-cli2',
+    'qmmp',
+    'ristretto', 'rofi',
+    'spotify', 'sqlitebrowser', 'strawberry', 'sublime-text-3', 'systemd',
+    'terminator', 'tplui', 'twmn', 'Thunar',
+    'variety', 'vifm', 'vlc', 'volumeicon', 'VSCodium', 'vscode-oss',
+    'webamp-desktop',
+    'xmms2',
+    'zsh'
+]
+
+CONFIG_FILES = [
+    'dmrc',
+    'face',
+    'fasd',
+    'fehbg',
+    'fzf.bash',
+    'fzf.zsh',
+    'mimeapps.list',
+    'user-dirs.dirs',
+    'user-dirs.locale',
+    'pavucontrol.ini',
+    'xmodmap',
+    'xresources',
+    'yad.conf',
+    'smb4krc',
+    'fonts.conf'
+]
+
+USER_CONFIG_HOME = os.environ.get('XDG_CONFIG_HOME', os.path.join(os.path.expanduser('~'), '.config'))
+
+COLOR_RED = '\x1b[31m'
+COLOR_GREEN = '\x1b[32m'
+COLOR_YELLOW = '\x1b[33m'
+COLOR_BLUE = '\x1b[34m'
+COLOR_RESET = '\x1b[39m'
+
+
+def get_current_mountpoints():
+
+    mountpoints = []
+    with open('/etc/mtab') as file:
+        for line in file:
+            if line.startswith('/dev/'):
+                mountpoints.append(line.split()[1])
+
+    return mountpoints
+
+
+def backup_directory(partition_mountpoint, dirname):
+
+    source_path = os.path.join(os.path.expanduser('~'), dirname)
+    dest_path = os.path.join(partition_mountpoint, 'personal', dirname)
+
+    if os.path.isdir(source_path):
+        print(f"Backing up: {COLOR_YELLOW}{dirname}{COLOR_RESET}")
+        # cmd = ['sudo', 'rsync', '-avxHAXWP', '--delete-after', source_path, dest_path]
+        # subprocess.Popen(cmd).wait()
+        cmd = f"sudo rsync -avxHAXWP --delete-after {source_path}/ {dest_path}/"
+        os.system(cmd)
+
+
+def backup_directories(partition_mountpoint):
+
+    for dir in DIRECTORIES:
+        backup_directory(partition_mountpoint, dir)
+
+
+def backup_configs(partition_mountpoint):
+
+    dest_config_path = os.path.join(partition_mountpoint, 'personal', '.config')
+
+    if not os.path.isdir(dest_config_path):
+        os.mkdir(dest_config_path)
+
+    for dir in CONFIG_DIRS:
+
+        source_path = os.path.join(USER_CONFIG_HOME, dir)
+        dest_path = os.path.join(partition_mountpoint, 'personal', '.config', dir)
+
+        if os.path.isdir(source_path):
+            print(f"Backing up: {COLOR_YELLOW}.config/{dir}{COLOR_RESET}")
+            # cmd = ['sudo', 'rsync', '-avxHAXWP', '--delete-after', source_path, dest_path, '--exclude="Cache"', '--exclude="cache"']
+            # subprocess.Popen(cmd).wait()
+            cmd = f"sudo rsync -avxHAXWP --delete-after {source_path}/ {dest_path}/ --exclude=\"Cache\" --exclude=\"cache\" --exclude=\"Trash\" --exclude=\"trash\""
+            os.system(cmd)
+
+
+def backup_all(partition_mountpoint):
+    backup_directories(partition_mountpoint)
+    backup_configs(partition_mountpoint)
+
+
+def main():
+
+    source = sys.argv[1]
+    dest = sys.argv[2]
+
+    if source not in SOURCES:
+        sys.exit(f"Source '{source}' not valid")
+    elif dest not in DESTINATIONS:
+        sys.exit(f"Destination '{dest}' not valid")
+
+    if dest == 'p1':
+        partition_label = 'passport1'
+    elif dest == 'p2':
+        partition_label = 'passport2'
+
+    partition_mountpoint = os.path.join(MOUNT_DIRECTORY, partition_label)
+
+    if partition_mountpoint not in get_current_mountpoints():
+        sys.exit(f"Mountpoint {partition_mountpoint} not mounted")
+
+    if source in DIRECTORIES:
+        backup_directory(partition_mountpoint, source)
+    elif source == 'dirs':
+        backup_directories(partition_mountpoint)
+    elif source == 'config':
+        backup_configs(partition_mountpoint)
+    elif source == 'all':
+        backup_all(partition_mountpoint)
+
+
+if __name__ == "__main__":
+    main()
