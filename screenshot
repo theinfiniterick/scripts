@@ -3,6 +3,7 @@
 # Dependencies:
 # - imagemagick
 # - xclip
+# - xdotool
 
 # Default image format
 DEFAULT_FORMAT="png"
