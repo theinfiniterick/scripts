@@ -38,9 +38,7 @@ show_help() {
 
 }
 
-args=$@
-# while true; do
-for a in $@; do
+for arg in $@; do
     case "$1" in
         '-h'|'--help')
             show_help
@@ -144,3 +142,5 @@ fi
 if [ $destination == "clipboard" ]; then
     rm "$path"
 fi
+
+
