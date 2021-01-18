@@ -12,7 +12,7 @@ DEFAULT_DIRECTORY="shot"
 VIEW_SIZE=60
 FORMATS=(png jpg gif bmp tif)
 
-# Default command line argument value
+# Default command line argument values
 source="fullscreen"
 destination="file"
 view_image=false
