@@ -1,0 +1,84 @@
+#!/bin/sh
+
+COLOR_DIRECTORY=$(tput dim)
+COLOR_FILENAME=$(tput bold)
+COLOR_ERROR=$(tput bold)$(tput setaf 1)
+COLOR_RESET=$(tput sgr0)
+
+show_help() {
+
+    echo "Usage: locatebin [OPTIONS] [KEYWORD]"
+    echo
+    echo "Matches:"
+    echo " -b, --basename   Match only the base name of path names"
+    echo " -w, --wholename  Match whole filenames"
+    echo
+    echo "Output:"
+    echo " -p, --path       Output full paths (default)"
+    echo " -f, --filename   Output only filenames"
+    echo
+    echo " -h, --help       Show this message"
+
+}
+
+while [ "$1" != "" ]; do
+    case "$1" in
+        '-h'|'--help')
+            show_help
+            exit 0
+            ;;
+        '-f'|'--filename')
+            name_only=1
+            shift
+            ;;
+        '-w'|'--wholename')
+            keyword_type="wholename"
+            shift
+            ;;
+        '-b'|'--basename')
+            keyword_type="basename"
+            shift
+            ;;
+        *)
+            if [ "$(echo $1 | head -c 1)" = "-" ]; then
+                echo "${COLOR_ERROR}error:${COLOR_RESET} flag $1 is not valid"
+                exit 1
+            elif [ -n "$keyword" ]; then
+                echo "${COLOR_ERROR}error:${COLOR_RESET} too many keywords specified"
+                exit 1
+            else
+                keyword=$1
+                shift
+            fi
+            ;;
+    esac
+done
+
+if [ -z "$keyword" ]; then
+    echo "${COLOR_ERROR}error:${COLOR_RESET} no keyword specified"
+    exit 1
+fi
+
+IFS=':'; for dir in $PATH; do
+
+    if [ -d "$dir" ]; then
+
+        if [ "$keyword_type" = "basename" ]; then
+            keyword="$keyword*"
+        elif [ "$keyword_type" != "wholename" ]; then
+            keyword="*$keyword*"
+        fi
+
+        find "$dir" -maxdepth 1 -executable -iname "$keyword" | while IFS= read -r path ; do
+            if [ "$name_only" = "1" ]; then
+                basename $path
+            else
+                directory=$(dirname $path)
+                filename=$(basename $path)
+                echo "${COLOR_DIRECTORY}$directory/${COLOR_RESET}${COLOR_FILENAME}$filename${COLOR_RESET}"
+            fi
+        done
+
+    fi
+
+done

@@ -1,0 +1,68 @@
+#!/bin/bash
+
+COLOR_VALUE=$(tput setaf 3)
+COLOR_ERROR=$(tput setaf 1)
+COLOR_RESET=$(tput sgr0)
+
+while [ "$1" != "" ]; do
+    case "$1" in
+        '-h'|'--help')
+            show_help
+            ;;
+        '-m'|'--memory')
+            limit=$2
+            shift 2
+            ;;
+        *)
+            command=$1
+			break
+            ;;
+    esac
+done
+
+if [ -z "$command" ]; then
+	echo "${COLOR_ERROR}error:${COLOR_RESET} no command specified."
+	exit 1
+elif ! command -v $command > /dev/null; then
+	echo "${COLOR_ERROR}error:${COLOR_RESET} command $command not found."
+	exit 1
+fi
+
+if [ -z "$limit" ]; then
+
+	echo "limit empty"
+	total_memory="$(($(free --giga | head -n 2 | tail -n 1 | awk '{print $2}') / 2))G"
+
+	if [ "$total_memory" != "0" ]; then
+		limit=$total_memory
+	fi
+
+else
+
+	limit_value="${limit::-1}"
+	limit_label="${limit: -1}"
+
+	if ! [[ $limit_value =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+		error=true
+	elif [ "$limit_label" != "G" ] && [ "$limit_label" != "M" ] && [ "$limit_label" != "K" ]; then
+		error=true
+	fi
+
+	if [ $error ]; then
+		echo "${COLOR_ERROR}error:${COLOR_RESET} $limit is not a valid memory limit" >&2
+	   exit 1
+	fi
+
+fi
+
+uid=$(id -u)
+gid=$(id -g)
+
+slice="memory_limited"
+unit="$command-$limit"
+
+echo "Running ${COLOR_VALUE}$(which $command)${COLOR_RESET}, limited to ${COLOR_VALUE}$limit${COLOR_RESET}.."
+
+# systemd-run --quiet --user --scope --uid=$uid --gid=$gid --property=MemoryLimit=$limit --slice=$slice --unit=$unit $command
+systemd-run --user --scope --uid=$uid --gid=$gid --property=MemoryLimit=$limit $command
+
